@@ -1,4 +1,5 @@
-import { useState, useMemo, useRef, useEffect } from "react";
+import React, { useState, useMemo, useRef, useEffect } from "react";
+import { supabase } from './supabaseClient';
 
 // ─── GLOBAL STYLES ──────────────────────────────────────────────────────────
 const GS = `
@@ -401,6 +402,139 @@ const INIT_EXAMS = [
 // Schema: { id, examId, courseId, studentId, answers:{qId→answer}, score, totalPoints, submittedAt, graded:bool }
 const INIT_EXAM_SUBMISSIONS = [];
 
+// ─── SUPABASE DATA NORMALIZERS ────────────────────────────────────────────────
+// Convert PostgreSQL snake_case rows → app camelCase shape so all
+// downstream components stay unchanged.
+
+const normalizeUser = (row) => ({
+  id:          row.display_id,
+  _uuid:       row.user_id,   // internal UUID — used as FK in DB inserts (created_by, student_id, etc.)
+  username:    row.username,
+  role:        row.role,
+  fullName:    row.full_name,
+  email:       row.email        || "",
+  civilStatus: row.civil_status || "",
+  birthdate:   row.birthdate    || "",
+  password:    "",   // never exposed; login uses verify_password RPC
+  ...(row.students?.[0] && {
+    yearLevel: row.students[0].year_level,
+    semester:  row.students[0].semester,
+  }),
+});
+
+// normalizeCourse was removed: loadCourses() in the App root performs its own
+// parallel-fetch mapping and never called this helper. Keeping dead normalizers
+// creates false confidence they're tested.
+
+
+
+const normalizeEnrollment = (row) => ({
+  studentId: row.users?.display_id         || row.student_id,
+  courseId:  row.courses?.course_code      || row.course_id,
+  grade:     row.final_grade               ?? null,
+  status:    row.enrollment_status         || "Enrolled",
+});
+
+const normalizeMaterial = (row) => ({
+  id:             row.material_id,
+  courseId:       row.courses?.course_code || row.course_id,
+  title:          row.title,
+  type:           row.material_type,
+  date:           row.created_at ? row.created_at.split("T")[0] : "",
+  dueDate:        row.due_date      || null,
+  points:         row.total_points  || null,
+  description:    row.description   || "",
+  content:        row.content       || "",
+  attachment_name: row.attachment_name || null,
+  attachment_url:  row.attachment_url  || null,   // Supabase Storage public URL
+  term:           row.term          || null,
+});
+
+const normalizeExam = (row) => ({
+  id:              row.exam_id,
+  courseId:        row.courses?.course_code || row.course_id,
+  title:           row.title,
+  date:            row.exam_date,
+  duration:        row.duration_minutes >= 60
+    ? `${Math.floor(row.duration_minutes / 60)} hour${Math.floor(row.duration_minutes / 60) > 1 ? "s" : ""}`
+    : `${row.duration_minutes} min`,
+  totalPoints:     row.total_points,
+  instantFeedback: row.instant_feedback,
+  term:            row.term || null,
+  questions: (row.exam_questions || []).map(q => ({
+    id:            q.question_id,
+    type:          q.question_type,
+    questionText:  q.question_text,
+    points:        q.points,
+    correctAnswer: q.correct_answer,
+    options:       q.options || undefined,
+  })).sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0)),
+});
+
+// Maps DB title-case enum values → app screaming-snake-case constants used by STATUS_META / StatusBadge.
+// Without this, StatusBadge looks up "Submitted" in STATUS_META (keyed by "SUBMITTED") and renders nothing.
+const DB_TO_STATUS = {
+  "Not Submitted": "NOT_SUBMITTED",
+  "Submitted":     "SUBMITTED",
+  "Late":          "LATE",
+  "Graded":        "GRADED",
+};
+
+const normalizeWorkSub = (r) => ({
+  materialId:   r.material_id,
+  submissionId: r.submission_id,
+  fileName:     r.file_name,
+  fileUrl:      r.file_url     || null,
+  fileSize:     r.file_size_kb ? r.file_size_kb * 1024 : 0,
+  submittedAt:  r.submitted_at,
+  isLate:       r.status === "Late",
+  // Map DB title-case → app screaming-snake-case so StatusBadge matches STATUS_META keys
+  status:       DB_TO_STATUS[r.status] ?? "NOT_SUBMITTED",
+  grade:        r.score ?? null,      // DB column is `score`
+  feedback:     r.feedback   || null,
+  gradedAt:     r.graded_at  || null,
+});
+
+
+// ─── SUPABASE STORAGE HELPERS ─────────────────────────────────────────────────
+// Requires two buckets created in Supabase dashboard → Storage:
+//   "submissions" — student work uploads  (set to Public, or use createSignedUrl for private)
+//   "materials"   — teacher attachments   (set to Public)
+//
+// Quick SQL to create them (run once in Supabase SQL editor):
+//   insert into storage.buckets (id, name, public) values ('submissions', 'submissions', true);
+//   insert into storage.buckets (id, name, public) values ('materials',   'materials',   true);
+//
+// RLS policies (run once):
+//   create policy "anon upload submissions" on storage.objects for insert to anon
+//     with check (bucket_id = 'submissions');
+//   create policy "anon read submissions"  on storage.objects for select to anon
+//     using (bucket_id = 'submissions');
+//   create policy "anon upload materials"  on storage.objects for insert to anon
+//     with check (bucket_id = 'materials');
+//   create policy "anon read materials"    on storage.objects for select to anon
+//     using (bucket_id = 'materials');
+//
+// ── Supabase Realtime setup (required for live teacher submission feed) ────────
+// In Supabase Dashboard → Database → Replication → Tables, enable replication for:
+//   work_submissions
+// Or run once in SQL editor:
+//   alter publication supabase_realtime add table work_submissions;
+
+async function uploadFileToStorage(bucket, storagePath, file) {
+  const { data, error } = await supabase.storage
+    .from(bucket)
+    .upload(storagePath, file, {
+      upsert:      true,
+      contentType: file.type || "application/octet-stream",
+    });
+  if (error) throw new Error(error.message);
+  const { data: urlData } = supabase.storage.from(bucket).getPublicUrl(data.path);
+  return urlData.publicUrl;
+}
+
+// Sanitise a filename so it is safe as a storage object key
+const safeFileName = (name) => name.replace(/[^a-zA-Z0-9._-]/g, "_");
 
 // ─── MOCK SUBMISSION DATA ─────────────────────────────────────────────────────
 // Simulates what students have already submitted for Lab/Assignment materials.
@@ -423,10 +557,10 @@ const INIT_SUBMISSIONS = [
 ];
 
 // Builds the full submission roster for a material (enrolled students who haven't submitted show as Pending)
-const buildSubmissionRoster = (materialId, courseId, allUsers) => {
-  const enrolled = INIT_ENROLLMENTS.filter(e => e.courseId === courseId);
+const buildSubmissionRoster = (materialId, courseId, allUsers, enrollments = [], submissions = []) => {
+  const enrolled = enrollments.filter(e => e.courseId === courseId);
   return enrolled.map(e => {
-    const sub  = INIT_SUBMISSIONS.find(s => s.materialId === materialId && s.studentId === e.studentId);
+    const sub  = submissions.find(s => s.materialId === materialId && s.studentId === e.studentId);
     const user = allUsers.find(u => u.id === e.studentId);
     return sub
       ? { ...sub, studentName: user?.fullName || e.studentId }
@@ -438,6 +572,26 @@ const buildSubmissionRoster = (materialId, courseId, allUsers) => {
 // ─── HELPERS ─────────────────────────────────────────────────────────────────
 const letterGrade = (g) => g >= 93 ? "A" : g >= 90 ? "A-" : g >= 87 ? "B+" : g >= 83 ? "B" : g >= 80 ? "B-" : g >= 77 ? "C+" : g >= 73 ? "C" : g >= 70 ? "C-" : "D";
 const gradeColor  = (g) => g >= 90 ? "#10b981" : g >= 75 ? "#f59e0b" : "#ef4444";
+
+// ── Grade formula: Course Work 30% · Class Standing 30% · Exams 40% ──────────
+// When a component has no data yet, its weight is redistributed proportionally
+// among the components that do have data so partial grades are still meaningful.
+const computeTermGrade = ({ cw, cs, exam }) => {
+  const parts = [
+    { val: cw,   w: 0.30 },
+    { val: cs,   w: 0.30 },
+    { val: exam, w: 0.40 },
+  ].filter(p => p.val != null);
+  if (!parts.length) return null;
+  const totalW = parts.reduce((s, p) => s + p.w, 0);
+  return Math.round(parts.reduce((s, p) => s + p.val * (p.w / totalW), 0));
+};
+// Class Standing % = average of Project, Recitation, Attendance (each /100)
+const csGradePct = (entry) => {
+  if (!entry) return null;
+  const nums = [entry.project, entry.recitation, entry.attendance].filter(x => x != null);
+  return nums.length ? Math.round(nums.reduce((a, b) => a + b, 0) / nums.length) : null;
+};
 
 // ─── PRIMITIVE UI ─────────────────────────────────────────────────────────────
 
@@ -706,13 +860,45 @@ function LoginPage({ onLogin }) {
   const [err, setErr] = useState("");
   const [loading, setLoading] = useState(false);
 
-  const doLogin = (username=u, password=p) => {
+  const doLogin = async (username=u, password=p) => {
     setErr(""); setLoading(true);
-    setTimeout(() => {
-      const user = INIT_USERS.find(x => x.username===username && x.password===password);
-      if (user) onLogin(user); else setErr("Invalid username or password.");
-      setLoading(false);
-    }, 500);
+    try {
+      // 1. Fetch user row (no join — avoids 406 PostgREST relationship errors)
+      const { data: userData, error: userError } = await supabase
+        .from("users")
+        .select("*")
+        .eq("username", username)
+        .single();
+
+      if (userError || !userData) {
+        setErr("Invalid username or password."); setLoading(false); return;
+      }
+
+      // 2. Verify password via the verify_password RPC
+      const { data: ok } = await supabase
+        .rpc("verify_password", { plain: password, hash: userData.password_hash });
+
+      if (!ok) {
+        setErr("Invalid username or password."); setLoading(false); return;
+      }
+
+      // 3. Fetch role-specific subclass row separately
+      let subData = null;
+      if (userData.role === "student") {
+        const { data } = await supabase
+          .from("students").select("*").eq("user_id", userData.user_id).single();
+        subData = { students: data ? [data] : [] };
+      } else if (userData.role === "teacher") {
+        const { data } = await supabase
+          .from("teachers").select("*").eq("user_id", userData.user_id).single();
+        subData = { teachers: data ? [data] : [] };
+      }
+
+      onLogin(normalizeUser({ ...userData, ...subData }));
+    } catch(e) {
+      setErr("Connection error. Please try again.");
+    }
+    setLoading(false);
   };
 
   const quick = [
@@ -797,7 +983,7 @@ function LoginPage({ onLogin }) {
 // ADMIN MODULE
 // ═══════════════════════════════════════════════════════════════════════════════
 
-function AdminOverview({ users, courses }) {
+function AdminOverview({ users, courses, enrollments }) {
   const students = users.filter(u => u.role==="student");
   const teachers = users.filter(u => u.role==="teacher");
   return (
@@ -808,7 +994,7 @@ function AdminOverview({ users, courses }) {
           <StatCard icon="🎓" label="Total Students" value={students.length} color="#10b981" bg="#d1fae5" />
           <StatCard icon="👩‍🏫" label="Total Teachers" value={teachers.length} color="#6366f1" bg="#ede9fe" />
           <StatCard icon="📚" label="Total Courses"  value={courses.length}  color="#f59e0b" bg="#fef3c7" />
-          <StatCard icon="📋" label="Enrollments"    value={INIT_ENROLLMENTS.length} color="#3b82f6" bg="#dbeafe" />
+          <StatCard icon="📋" label="Enrollments"    value={enrollments.length} color="#3b82f6" bg="#dbeafe" />
         </div>
         <div style={{ flex:1, display:"grid", gridTemplateColumns:"1fr 1fr", gap:14, overflow:"hidden" }}>
           <Card style={{ display:"flex", flexDirection:"column", overflow:"hidden" }}>
@@ -848,12 +1034,79 @@ function AdminCreateAccounts({ users, setUsers }) {
     return e;
   };
 
-  const submit = () => {
+  const submit = async () => {
     const e = validate();
     if (Object.keys(e).length) { setErrors(e); return; }
-    const prefix  = role==="student" ? "STU" : "TCH";
-    const count   = users.filter(u=>u.role===role).length + 1;
-    const newUser = { ...form, id:`${prefix}${String(count).padStart(3,"0")}`, role };
+
+    // 3. Insert into users table
+    const { data: hashData, error: hashErr } = await supabase
+      .rpc("hash_password", { plain: form.password });
+    if (hashErr || !hashData) {
+      setErrors({ password: "Could not hash password. Run hash_password SQL in Supabase." });
+      return;
+    }
+
+    // 2. Generate display_id safely from the DB — avoids race conditions and
+    //    breaks caused by inactive users excluded from loadUsers() local state.
+    const prefix = role === "student" ? "STU" : "TCH";
+    const { data: maxRow } = await supabase
+      .from("users")
+      .select("display_id")
+      .eq("role", role)
+      .order("display_id", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    const lastNum = maxRow ? parseInt(maxRow.display_id.replace(/\D/g, ""), 10) : 0;
+    const nextNum = (isNaN(lastNum) ? 0 : lastNum) + 1;
+    const displayId = `${prefix}${String(nextNum).padStart(3, "0")}`;
+
+    // 3. Insert into users table
+    const { data: newUserRow, error: userErr } = await supabase
+      .from("users")
+      .insert({
+        display_id:    displayId,
+        username:      form.username.trim(),
+        full_name:     form.fullName.trim(),
+        email:         form.email.trim() || null,
+        password_hash: hashData,
+        civil_status:  form.civilStatus || null,
+        birthdate:     form.birthdate   || null,
+        role,
+      })
+      .select()
+      .single();
+
+    if (userErr) {
+      setErrors({ username: userErr.message.includes("username") ? "Username already taken" : userErr.message });
+      return;
+    }
+
+    // 3. Insert into role subclass table
+    if (role === "student") {
+      await supabase.from("students").insert({
+        user_id:    newUserRow.user_id,
+        year_level: form.yearLevel,
+        semester:   form.semester,
+      });
+    } else {
+      await supabase.from("teachers").insert({
+        user_id: newUserRow.user_id,
+      });
+    }
+
+    // 4. Update local state so grid updates immediately
+    const newUser = {
+      id:          displayId,
+      username:    form.username.trim(),
+      fullName:    form.fullName.trim(),
+      email:       form.email.trim(),
+      civilStatus: form.civilStatus,
+      birthdate:   form.birthdate,
+      role,
+      yearLevel:   form.yearLevel,
+      semester:    form.semester,
+      password:    "",
+    };
     setUsers(prev => [...prev, newUser]);
     setForm(emptyForm); setErrors({});
     setToast(`${role==="student"?"Student":"Teacher"} account created!`);
@@ -965,7 +1218,7 @@ function AdminCreateAccounts({ users, setUsers }) {
   );
 }
 
-function AdminCreateCourses({ courses, setCourses, users }) {
+function AdminCreateCourses({ courses, setCourses, users, enrollments: enrollmentsProp, setEnrollments }) {
   const teachers = users.filter(u => u.role==="teacher");
   const students = users.filter(u => u.role==="student");
   const [tab, setTab]  = useState("courses");
@@ -978,27 +1231,123 @@ function AdminCreateCourses({ courses, setCourses, users }) {
 
   const [enroll, setEnroll]   = useState({ studentId:"", courseId:"" });
   const [tAssign, setTAssign] = useState({ teacherId:"", courseId:"" });
-  const [myEnrolls, setMyEnrolls] = useState(INIT_ENROLLMENTS);
 
-  const addCourse = () => {
+  // ── Use App-level enrollments directly (no local copy) ──────────────────────
+  // This ensures the list survives navigation and logout/re-login.
+  const myEnrolls = enrollmentsProp || [];
+
+  const addCourse = async () => {
     if (!cf.code.trim() || !cf.name.trim()) return;
-    const t = teachers.find(x=>x.id===cf.teacher);
-    setCourses(prev => [...prev, { ...cf, id:cf.code, teacherName:t?.fullName||"Unassigned" }]);
+    const t = teachers.find(x => x.id === cf.teacher);
+
+    // 1. Insert the course row
+    const { data: newCourse, error } = await supabase
+      .from("courses")
+      .insert({
+        course_code: cf.code.trim().toUpperCase(),
+        course_name: cf.name.trim(),
+        units:       parseInt(cf.units) || 3,
+      })
+      .select()
+      .single();
+    if (error) { showToast(error.message.includes("unique") ? "Course code already exists." : "Error: " + error.message); return; }
+
+    // 2. Insert a schedule row (required so loadCourses() can join year_level/semester)
+    let scheduleId = null;
+    if (cf.schedule.trim()) {
+      const { data: newSched } = await supabase.from("schedules").insert({
+        course_id:      newCourse.course_id,
+        schedule_label: cf.schedule.trim(),
+        academic_year:  "2025-2026",
+        semester:       cf.semester  || null,
+        year_level:     cf.yearLevel || null,
+      }).select("schedule_id").single();
+      scheduleId = newSched?.schedule_id || null;
+    }
+
+    // 3. Assign teacher (required so loadCourses() can map teacher → course)
+    if (t?._uuid) {
+      await supabase.from("teacher_course_assignments").upsert({
+        teacher_id:    t._uuid,
+        course_id:     newCourse.course_id,
+        schedule_id:   scheduleId,
+        is_primary:    true,
+        academic_year: "2025-2026",
+        semester:      cf.semester || null,
+      }, { onConflict: "teacher_id,course_id,academic_year,semester" });
+    }
+
+    setCourses(prev => [...prev, {
+      id: newCourse.course_code, code: newCourse.course_code,
+      name: newCourse.course_name, units: newCourse.units,
+      teacher: cf.teacher || "", teacherName: t?.fullName || "Unassigned",
+      schedule: cf.schedule || "", yearLevel: cf.yearLevel || "",
+      semester: cf.semester || "", _uuid: newCourse.course_id,
+    }]);
     setCf(emptyC); showToast("Course created successfully!");
   };
 
-  const assignStudent = () => {
+  const assignStudent = async () => {
     if (!enroll.studentId || !enroll.courseId) return;
-    if (myEnrolls.find(e=>e.studentId===enroll.studentId&&e.courseId===enroll.courseId)) { showToast("Already enrolled!"); return; }
-    setMyEnrolls(prev=>[...prev,{...enroll,grade:null,status:"Enrolled"}]);
-    setEnroll({studentId:"",courseId:""}); showToast("Student enrolled!");
+
+    // ── Client-side duplicate guard (uses live App-level state) ───────────────
+    if (myEnrolls.find(e => e.studentId===enroll.studentId && e.courseId===enroll.courseId)) {
+      showToast("Student is already enrolled in this course."); return;
+    }
+
+    // ── Resolve display_id → UUID for both student and course ─────────────────
+    const [uRes, cRes] = await Promise.all([
+      supabase.from("users").select("user_id").eq("display_id", enroll.studentId).single(),
+      supabase.from("courses").select("course_id").eq("course_code", enroll.courseId).single(),
+    ]);
+    if (uRes.error || cRes.error) { showToast("Could not find student or course."); return; }
+
+    // ── Upsert instead of insert — gracefully handles any DB-level duplicates ──
+    // onConflict targets the unique constraint uq_student_course_period.
+    const { error } = await supabase.from("student_course_assignments").upsert({
+      student_id:        uRes.data.user_id,
+      course_id:         cRes.data.course_id,
+      enrollment_status: "Enrolled",
+      academic_year:     "2025-2026",
+      semester:          "1st Semester",
+    }, { onConflict: "student_id,course_id,academic_year,semester" });
+
+    if (error) { showToast("Error: " + error.message); return; }
+
+    // ── Update App-level state so the new row survives navigation ──────────────
+    const newEntry = { studentId: enroll.studentId, courseId: enroll.courseId, grade: null, status: "Enrolled" };
+    setEnrollments(prev => [...prev, newEntry]);
+
+    setEnroll({ studentId:"", courseId:"" }); showToast("Student enrolled!");
   };
 
-  const assignTeacher = () => {
+  const assignTeacher = async () => {
     if (!tAssign.teacherId || !tAssign.courseId) return;
-    const t = teachers.find(x=>x.id===tAssign.teacherId);
-    setCourses(prev=>prev.map(c=>c.id===tAssign.courseId?{...c,teacher:tAssign.teacherId,teacherName:t?.fullName||""}:c));
-    setTAssign({teacherId:"",courseId:""}); showToast("Teacher assigned!");
+    const t = teachers.find(x => x.id === tAssign.teacherId);
+    const [uRes, cRes] = await Promise.all([
+      supabase.from("users").select("user_id").eq("display_id", tAssign.teacherId).single(),
+      supabase.from("courses").select("course_id").eq("course_code", tAssign.courseId).single(),
+    ]);
+    if (uRes.error || cRes.error) { showToast("Could not find teacher or course."); return; }
+
+    // Upsert on (course_id, academic_year, semester) — one teacher per course per period.
+    // This requires the DB constraint fix in fix_teacher_constraint.sql to have been run first.
+    const { error } = await supabase
+      .from("teacher_course_assignments")
+      .upsert({
+        teacher_id:    uRes.data.user_id,
+        course_id:     cRes.data.course_id,
+        is_primary:    true,
+        academic_year: "2025-2026",
+        semester:      "1st Semester",
+      }, { onConflict: "course_id,academic_year,semester" });
+
+    if (error) { showToast("Error: " + error.message); return; }
+    setCourses(prev => prev.map(c =>
+      c.id === tAssign.courseId ? { ...c, teacher: tAssign.teacherId, teacherName: t?.fullName || "" } : c
+    ));
+    setTAssign({ teacherId:"", courseId:"" });
+    showToast("Teacher assigned!");
   };
 
   const courseCols = [
@@ -1158,7 +1507,7 @@ function AdminViewAccounts({ users }) {
   );
 }
 
-function AdminDashboard({ user, onLogout, users, setUsers, courses, setCourses }) {
+function AdminDashboard({ user, onLogout, users, setUsers, courses, setCourses, enrollments, setEnrollments }) {
   const [page, setPage] = useState("overview");
   const nav = [
     { id:"overview",         label:"Overview",         icon:"⬡",  badge:null },
@@ -1167,9 +1516,9 @@ function AdminDashboard({ user, onLogout, users, setUsers, courses, setCourses }
     { id:"view-accounts",    label:"Account Directory", icon:"👥", badge:users.filter(u=>u.role!=="admin").length },
   ];
   const pages = {
-    overview:        <AdminOverview       users={users} courses={courses} />,
+    overview:        <AdminOverview       users={users} courses={courses} enrollments={enrollments} />,
     "create-accounts": <AdminCreateAccounts users={users} setUsers={setUsers} />,
-    "create-courses":  <AdminCreateCourses  courses={courses} setCourses={setCourses} users={users} />,
+    "create-courses":  <AdminCreateCourses  courses={courses} setCourses={setCourses} users={users} enrollments={enrollments} setEnrollments={setEnrollments} />,
     "view-accounts":   <AdminViewAccounts   users={users} />,
   };
   return (
@@ -1193,6 +1542,15 @@ const MaterialType = Object.freeze({
   LAB:        "Lab",
   ASSIGNMENT: "Assignment",
 });
+
+// Academic term periods — used by both Materials and Exams
+const EXAM_TERMS = ["Prelim", "Midterm", "Semi-Final", "Finals"];
+const TERM_META = {
+  "Prelim":     { color:"#6366f1", bg:"#ede9fe" },
+  "Midterm":    { color:"#0ea5e9", bg:"#dbeafe" },
+  "Semi-Final": { color:"#f59e0b", bg:"#fef3c7" },
+  "Finals":     { color:"#ef4444", bg:"#fee2e2" },
+};
 
 // Type predicate — mirrors: (type): type is LAB | ASSIGNMENT => [...]includes(type)
 const isSubmittable = (type) =>
@@ -1333,23 +1691,74 @@ function FileUploadZone({ onFile }) {
 }
 
 // ── SubmissionPortal ──────────────────────────────────────────────────────────
-function SubmissionPortal({ material }) {
-  const [file,      setFile]      = useState(null);
-  const [status,    setStatus]    = useState(SubmissionStatus.NOT_SUBMITTED);
-  const [submitted, setSubmitted] = useState(false);
-  const [submitAt,  setSubmitAt]  = useState(null);
+function SubmissionPortal({ material, user, existingSubmission, onSubmissionSaved }) {
+  // Restore from DB if student already submitted this material
+  const [file,      setFile]      = useState(() =>
+    existingSubmission?.fileName ? { name: existingSubmission.fileName, size: existingSubmission.fileSize || 0 } : null
+  );
+  const [status,    setStatus]    = useState(() => {
+    if (!existingSubmission?.fileName) return SubmissionStatus.NOT_SUBMITTED;
+    return existingSubmission.isLate ? SubmissionStatus.LATE : SubmissionStatus.SUBMITTED;
+  });
+  const [submitted, setSubmitted] = useState(() => !!existingSubmission?.fileName);
+  const [submitAt,  setSubmitAt]  = useState(() => existingSubmission?.submittedAt || null);
   const [toast,     setToast]     = useState("");
+
+  // Sync if existingSubmission arrives asynchronously (parent fetches after mount)
+  useEffect(() => {
+    if (existingSubmission?.fileName && !submitted) {
+      setFile({ name: existingSubmission.fileName, size: existingSubmission.fileSize || 0 });
+      setStatus(existingSubmission.isLate ? SubmissionStatus.LATE : SubmissionStatus.SUBMITTED);
+      setSubmitted(true);
+      setSubmitAt(existingSubmission.submittedAt || null);
+    }
+  }, [existingSubmission]);
 
   const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(""), 3000); };
   const dueDate   = material.dueDate ? new Date(material.dueDate) : null;
   const isLate    = dueDate && new Date() > dueDate;
   const fmtDate   = (iso) => iso ? new Date(iso).toLocaleString("en-US",{month:"short",day:"numeric",year:"numeric",hour:"2-digit",minute:"2-digit"}) : "—";
 
-  const submit = () => {
+  const submit = async () => {
     if (!file) return;
+    const now       = new Date().toISOString();
+    const newStatus = isLate ? SubmissionStatus.LATE : SubmissionStatus.SUBMITTED;
+    // DB enum values are title-cased: 'Submitted' | 'Late'
+    const dbStatus  = isLate ? "Late" : "Submitted";
+
+    if (user?._uuid && material?.id) {
+      // ── 1. Upload actual file bytes to Supabase Storage ──────────────────────
+      let fileUrl = null;
+      if (file instanceof File) {
+        // Path: submissions/{material_id}/{student_uuid}/{timestamp}_{filename}
+        const storagePath = `${material.id}/${user._uuid}/${Date.now()}_${safeFileName(file.name)}`;
+        try {
+          showToast("Uploading file…");
+          fileUrl = await uploadFileToStorage("submissions", storagePath, file);
+        } catch (uploadErr) {
+          showToast("Upload failed: " + uploadErr.message);
+          return;
+        }
+      }
+
+      // ── 2. Persist metadata + storage URL to work_submissions ────────────────
+      const { error } = await supabase.from("work_submissions").upsert({
+        material_id:  material.id,
+        student_id:   user._uuid,
+        file_name:    file.name,
+        file_size_kb: file.size ? Math.ceil(file.size / 1024) : null,  // column is file_size_kb
+        file_url:     fileUrl,
+        submitted_at: now,
+        status:       dbStatus,   // enum: 'Submitted' | 'Late' (title-case)
+      }, { onConflict: "material_id,student_id" });
+      if (error) { showToast("Error saving: " + error.message); return; }
+    }
+
     setSubmitted(true);
-    setSubmitAt(new Date().toISOString());
-    setStatus(isLate ? SubmissionStatus.LATE : SubmissionStatus.SUBMITTED);
+    setSubmitAt(now);
+    setStatus(newStatus);
+    onSubmissionSaved?.({ materialId: material.id, fileName: file.name, fileSize: file.size || 0,
+      submittedAt: now, isLate: !!isLate, status: newStatus });
     showToast(isLate ? "Submitted (late — check policy)" : "Submitted successfully!");
   };
 
@@ -1428,6 +1837,35 @@ function SubmissionPortal({ material }) {
           </div>
         ))}
       </div>
+
+      {/* Grade result card — shown once teacher has graded */}
+      {existingSubmission?.grade != null && (
+        <div className="mat-fade-up" style={{ background:"linear-gradient(135deg,#f0fdf4,#dcfce7)", border:"2px solid #86efac", borderRadius:10, padding:"14px 16px", flexShrink:0 }}>
+          <div style={{ fontSize:10, fontWeight:800, color:"#14532d", textTransform:"uppercase", letterSpacing:"0.07em", marginBottom:8 }}>
+            🎓 Grade Received
+          </div>
+          <div style={{ display:"flex", alignItems:"center", gap:12, marginBottom: existingSubmission.feedback ? 10 : 0 }}>
+            <div style={{ width:56, height:56, borderRadius:"50%", background: existingSubmission.grade >= 75 ? "#16a34a" : "#dc2626",
+              display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0 }}>
+              <span style={{ fontSize:17, fontWeight:900, color:"#fff" }}>{existingSubmission.grade}%</span>
+            </div>
+            <div>
+              <div style={{ fontSize:15, fontWeight:900, color: existingSubmission.grade >= 75 ? "#15803d" : "#b91c1c" }}>
+                {existingSubmission.grade >= 90 ? "Excellent!" : existingSubmission.grade >= 75 ? "Passed" : "Below Passing"}
+              </div>
+              <div style={{ fontSize:11, color:"#64748b", marginTop:2 }}>
+                Score: {existingSubmission.grade} / {material.points ?? "—"} pts
+              </div>
+            </div>
+          </div>
+          {existingSubmission.feedback && (
+            <div style={{ background:"rgba(255,255,255,.7)", borderRadius:7, padding:"9px 11px", fontSize:12, color:"#334155", lineHeight:1.55 }}>
+              <div style={{ fontSize:9, fontWeight:800, color:"#64748b", textTransform:"uppercase", letterSpacing:"0.07em", marginBottom:4 }}>Teacher's Feedback</div>
+              {existingSubmission.feedback}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -1466,13 +1904,27 @@ function LectureView({ material }) {
             : <p style={{ color:"#94a3b8", fontStyle:"italic" }}>No content available.</p>
           }
         </div>
+        {/* Teacher attachment download */}
+        {material.attachment_url && (
+          <div style={{ marginTop:18, padding:"11px 14px", background:"#f0f9ff", border:"1px solid #bae6fd", borderRadius:8, display:"flex", alignItems:"center", gap:10 }}>
+            <span style={{ fontSize:18 }}>{fileIcon(material.attachment_name)}</span>
+            <div style={{ flex:1, minWidth:0 }}>
+              <div style={{ fontSize:12, fontWeight:700, color:"#0369a1", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{material.attachment_name || "Attachment"}</div>
+              <div style={{ fontSize:10, color:"#64748b" }}>Attached file</div>
+            </div>
+            <Btn variant="ghost" size="sm" style={{ border:"1px solid #7dd3fc" }}
+              onClick={() => window.open(material.attachment_url, "_blank", "noopener,noreferrer")}>
+              ⬇ Download
+            </Btn>
+          </div>
+        )}
       </div>
     </div>
   );
 }
 
 // ── AssignmentView — used for ASSIGNMENT and LAB types (dual-pane) ────────────
-function AssignmentView({ material }) {
+function AssignmentView({ material, user, existingSubmission, onSubmissionSaved }) {
   const m = MAT_META[material.type] || MAT_META[MaterialType.ASSIGNMENT];
   return (
     <div style={{ flex:1, display:"flex", flexDirection:"column", overflow:"hidden" }}>
@@ -1506,6 +1958,20 @@ function AssignmentView({ material }) {
                 : <p style={{ color:"#94a3b8", fontStyle:"italic" }}>No instructions provided.</p>
               }
             </div>
+            {/* Teacher attachment download */}
+            {material.attachment_url && (
+              <div style={{ marginTop:14, padding:"10px 13px", background:"#f0f9ff", border:"1px solid #bae6fd", borderRadius:8, display:"flex", alignItems:"center", gap:9 }}>
+                <span style={{ fontSize:16 }}>{fileIcon(material.attachment_name)}</span>
+                <div style={{ flex:1, minWidth:0 }}>
+                  <div style={{ fontSize:11, fontWeight:700, color:"#0369a1", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{material.attachment_name || "Attachment"}</div>
+                  <div style={{ fontSize:10, color:"#64748b" }}>Reference file</div>
+                </div>
+                <Btn variant="ghost" size="sm" style={{ border:"1px solid #7dd3fc" }}
+                  onClick={() => window.open(material.attachment_url, "_blank", "noopener,noreferrer")}>
+                  ⬇ Download
+                </Btn>
+              </div>
+            )}
           </div>
         </div>
         {/* RIGHT — submission portal */}
@@ -1514,7 +1980,7 @@ function AssignmentView({ material }) {
             <span style={{ fontSize:10, fontWeight:800, color:"#64748b", textTransform:"uppercase", letterSpacing:"0.07em" }}>📤 Submission Portal</span>
           </div>
           <div style={{ flex:1, padding:"12px 14px", overflow:"hidden" }}>
-            <SubmissionPortal material={material} />
+            <SubmissionPortal material={material} user={user} existingSubmission={existingSubmission} onSubmissionSaved={onSubmissionSaved} />
           </div>
         </div>
       </div>
@@ -1525,7 +1991,7 @@ function AssignmentView({ material }) {
 // ── MaterialDetailView — the main conditional container ───────────────────────
 // Implements: selectedMaterial ? <MaterialDetailView /> : <DefaultCourseView />
 // Back button sets selectedMaterial → null in the parent (StudentCourses)
-function MaterialDetailView({ material, onBack, course }) {
+function MaterialDetailView({ material, onBack, course, user, existingSubmission, onSubmissionSaved }) {
   // Conditional rendering gate:
   //   isSubmittable(type) → AssignmentView (dual-pane + submission portal)
   //   else               → LectureView    (full-width read-only content)
@@ -1555,7 +2021,7 @@ function MaterialDetailView({ material, onBack, course }) {
 
       {/* Conditional layout — the core ternary */}
       {showAssignmentLayout
-        ? <AssignmentView material={material} />
+        ? <AssignmentView material={material} user={user} existingSubmission={existingSubmission} onSubmissionSaved={onSubmissionSaved} />
         : <LectureView    material={material} />
       }
     </div>
@@ -1740,21 +2206,37 @@ function ExamTaker({ exam, course, user, onBack, onSubmit }) {
 
     // ── Auto-grade ──
     let score = 0;
-    questions.forEach(q => {
-      const given = answers[q.id] || "";
+    const questionResults = questions.map(q => {
+      const given   = answers[q.id] || "";
       const correct = q.correctAnswer || "";
+      let isCorrect = false;
       if (q.type === "Identification") {
-        if (given.trim().toLowerCase() === correct.trim().toLowerCase()) score += q.points;
+        isCorrect = given.trim().toLowerCase() === correct.trim().toLowerCase();
       } else {
-        if (given === correct) score += q.points;
+        isCorrect = given === correct;
       }
+      const pointsAwarded = isCorrect ? q.points : 0;
+      score += pointsAwarded;
+      return {
+        questionId:    q.id,       // UUID for DB-sourced exams
+        givenAnswer:   given || null,
+        isCorrect,
+        pointsAwarded,
+      };
     });
 
     const submission = {
-      id: `SUB-EX-${Date.now()}`,
-      examId: exam.id, courseId: course?.id, studentId: user.id,
-      answers: { ...answers }, score, totalPoints: exam.totalPoints,
-      submittedAt: new Date().toISOString(), graded: true,
+      id:              `SUB-EX-${Date.now()}`,
+      examId:          exam.id,
+      courseId:        course?.id,
+      studentId:       user.id,        // display_id (STU001) — for local state lookups
+      studentUuid:     user._uuid,     // UUID — required for DB FK inserts
+      answers:         { ...answers },
+      questionResults,                 // persisted to exam_question_answers
+      score,
+      totalPoints:     exam.totalPoints,
+      submittedAt:     new Date().toISOString(),
+      graded:          true,
     };
     setResult(submission);
     setSubmitted(true);
@@ -1916,15 +2398,94 @@ function ExamTaker({ exam, course, user, onBack, onSubmit }) {
 // STUDENT MODULE
 // ═══════════════════════════════════════════════════════════════════════════════
 
-function StudentCourses({ user, courses, onSubmitExam, examSubmissions }) {
-  const enrollments = INIT_ENROLLMENTS.filter(e => e.studentId===user.id);
-  const myCourses   = enrollments.map(e => ({ ...courses.find(c=>c.id===e.courseId)||{}, ...e })).filter(c=>c.id);
+function StudentCourses({ user, courses, onSubmitExam, examSubmissions, enrollments }) {
+  const myEnrollments = enrollments.filter(e => e.studentId===user.id);
+  const enrollments_ref = myEnrollments;
+  const myCourses   = myEnrollments.map(e => ({ ...courses.find(c=>c.id===e.courseId)||{}, ...e })).filter(c=>c.id);
+
+  // ── Live materials and exams from Supabase ────────────────────────────────
+  const [allMaterials, setAllMaterials] = useState([]);
+  const [allExams,     setAllExams]     = useState([]);
+
+  useEffect(() => {
+    // Build UUID→code map from courses prop (courses have _uuid set in App loadCourses)
+    const uuidToCode = {};
+    courses.forEach(c => { if (c._uuid) uuidToCode[c._uuid] = c.id; });
+
+    async function loadMaterials() {
+      const courseUuids = myCourses.map(c => c._uuid).filter(Boolean);
+      if (!courseUuids.length) return;
+      const { data } = await supabase
+        .from("materials")
+        .select("*")
+        .in("course_id", courseUuids)
+        .eq("is_published", true);
+      if (data) setAllMaterials(data.map(r => normalizeMaterial({
+        ...r, courses: { course_code: uuidToCode[r.course_id] || r.course_id }
+      })));
+    }
+    async function loadExams() {
+      const courseUuids = myCourses.map(c => c._uuid).filter(Boolean);
+      if (!courseUuids.length) return;
+      const [examRes, qRes] = await Promise.all([
+        supabase.from("exams").select("*").in("course_id", courseUuids).eq("is_published", true),
+        supabase.from("exam_questions").select("*"),
+      ]);
+      if (examRes.data) setAllExams(examRes.data.map(r => normalizeExam({
+        ...r,
+        courses:        { course_code: uuidToCode[r.course_id] || r.course_id },
+        exam_questions: (qRes.data || []).filter(q => q.exam_id === r.exam_id),
+      })));
+    }
+    loadMaterials();
+    loadExams();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [enrollments, courses]);
 
   const [sel, setSel] = useState(null);
   const [tab, setTab] = useState("info");
   const [selectedMaterial, setSelectedMaterial] = useState(null);
   // ── selectedExam: null = courses view, object = ExamTaker ──
   const [selectedExam, setSelectedExam] = useState(null);
+
+  // ── Work submissions: persisted student file submissions ─────────────────
+  const [workSubmissions, setWorkSubmissions] = useState([]);
+  useEffect(() => {
+    if (!user?._uuid) return;
+    supabase.from("work_submissions").select("*").eq("student_id", user._uuid)
+      .then(({ data }) => {
+        if (data) setWorkSubmissions(data.map(r => normalizeWorkSub(r)));
+      });
+  }, [user?._uuid]);
+
+  // Realtime: push grade updates to student as soon as teacher saves
+  useEffect(() => {
+    if (!user?._uuid) return;
+    const channel = supabase
+      .channel(`student_work_subs:${user._uuid}`)
+      .on("postgres_changes", {
+        event:  "UPDATE",
+        schema: "public",
+        table:  "work_submissions",
+        filter: `student_id=eq.${user._uuid}`,
+      }, (payload) => {
+        setWorkSubmissions(prev => prev.map(s =>
+          s.materialId === payload.new.material_id
+            ? normalizeWorkSub(payload.new)
+            : s
+        ));
+      })
+      .subscribe();
+    return () => { supabase.removeChannel(channel); };
+  }, [user?._uuid]);
+
+  const handleWorkSubmissionSaved = (sub) => {
+    setWorkSubmissions(prev => {
+      const idx = prev.findIndex(s => s.materialId === sub.materialId);
+      if (idx >= 0) { const n = [...prev]; n[idx] = { ...n[idx], ...sub }; return n; }
+      return [...prev, sub];
+    });
+  };
 
   const courseCols = [
     {field:"code",        header:"Code",     width:80},
@@ -1990,9 +2551,9 @@ function StudentCourses({ user, courses, onSubmitExam, examSubmissions }) {
               {/* ── Materials tab — items are clickable → sets selectedMaterial ── */}
               {tab==="materials" && (
                 <div style={{ display:"flex", flexDirection:"column", gap:7 }}>
-                  {INIT_MATERIALS.filter(m=>m.courseId===sel.id).length===0
+                  {allMaterials.filter(m=>m.courseId===sel.id).length===0
                     ? <div style={{ color:"#94a3b8", fontSize:13, textAlign:"center", padding:"20px 0" }}>No materials yet</div>
-                    : INIT_MATERIALS.filter(m=>m.courseId===sel.id).map(m => {
+                    : allMaterials.filter(m=>m.courseId===sel.id).map(m => {
                         const meta = MAT_META[m.type] || MAT_META[MaterialType.LECTURE];
                         return (
                           // ← Click triggers: selectedMaterial = m → MaterialDetailView renders
@@ -2025,9 +2586,9 @@ function StudentCourses({ user, courses, onSubmitExam, examSubmissions }) {
               {/* ── Exams tab ── */}
               {tab==="exams" && (
                 <div style={{ display:"flex", flexDirection:"column", gap:7 }}>
-                  {INIT_EXAMS.filter(e=>e.courseId===sel.id).length===0
+                  {allExams.filter(e=>e.courseId===sel.id).length===0
                     ? <div style={{ color:"#94a3b8", fontSize:13, textAlign:"center", padding:"20px 0" }}>No exams scheduled</div>
-                    : INIT_EXAMS.filter(e=>e.courseId===sel.id).map(exam => {
+                    : allExams.filter(e=>e.courseId===sel.id).map(exam => {
                         const taken = examSubmissions.find(s => s.examId===exam.id && s.studentId===user.id);
                         return (
                           <div key={exam.id} style={{ padding:"10px 11px", background:"#f8fafc", borderRadius:6, border:"1px solid #e2e8f0" }}>
@@ -2077,6 +2638,9 @@ function StudentCourses({ user, courses, onSubmitExam, examSubmissions }) {
         material={selectedMaterial}
         course={myCourses.find(c => c.id === selectedMaterial.courseId)}
         onBack={() => setSelectedMaterial(null)}
+        user={user}
+        existingSubmission={workSubmissions.find(s => s.materialId === selectedMaterial.id)}
+        onSubmissionSaved={handleWorkSubmissionSaved}
       />
     : DefaultCourseView;
 }
@@ -2134,99 +2698,173 @@ function StudentProfile({ user }) {
   );
 }
 
-// ── AG Grid Column Definitions — Student Grade Report ──────────────────────
-// Col spec: { field, header, width?, cellRenderer?, sortable? }
-// Cell styling classes: grade-cell-high (≥90), grade-cell-pass (75–89), grade-cell-warn (60–74), grade-cell-fail (<60)
-//
-// Columns:  Course Code | Course Name | Midterm Grade | Final Grade | Overall Status
-// Drill-down: click row → expanded sub-table showing individual exam scores
+// ── StudentGrades ─────────────────────────────────────────────────────────────
+// Per-term grade = CW 30% + Class Standing 30% + Exam 40%.
+// Drill-down shows the three component breakdowns for each term.
+function StudentGrades({ user, courses, examSubmissions, enrollments }) {
+  const myEnrollments = enrollments.filter(e => e.studentId === user.id);
+  const [expandedId,   setExpandedId]   = useState(null);
+  const [allExams,     setAllExams]     = useState([]);
+  const [allMaterials, setAllMaterials] = useState([]);  // {material_id, course_id, material_type, term, total_points}
+  const [classStandings, setClassStandings] = useState([]); // normalized
+  const [workSubs,     setWorkSubs]     = useState([]);  // graded work_submissions for this student
 
-function StudentGrades({ user, courses, examSubmissions }) {
-  const enrollments = INIT_ENROLLMENTS.filter(e => e.studentId===user.id);
-  const [expandedId, setExpandedId] = useState(null);  // drill-down course id
+  useEffect(() => {
+    async function loadAll() {
+      if (!user._uuid) return;
+      const uuidToCode = {};
+      courses.forEach(c => { if (c._uuid) uuidToCode[c._uuid] = c.id; });
+      const courseUuids = myEnrollments.map(e => {
+        const c = courses.find(x => x.id === e.courseId);
+        return c?._uuid;
+      }).filter(Boolean);
+      if (!courseUuids.length) return;
 
-  // Build row data with midterm/final split (mock: first exam = midterm, rest = final avg)
-  const rows = enrollments.map(e => {
-    const c = courses.find(x => x.id===e.courseId) || {};
-    const courseExams = INIT_EXAMS.filter(ex => ex.courseId===e.courseId);
-    // Student submissions for this course
-    const mySubmissions = examSubmissions.filter(s => s.studentId===user.id && s.courseId===e.courseId);
-    const midExam = courseExams[0];
-    const finalExams = courseExams.slice(1);
-    const midSub  = midExam ? mySubmissions.find(s=>s.examId===midExam.id) : null;
-    const midGrade = midSub ? Math.round((midSub.score/midSub.totalPoints)*100) : (e.grade != null ? e.grade : null);
-    const finalScores = finalExams.map(ex=>{
-      const sub = mySubmissions.find(s=>s.examId===ex.id);
-      return sub ? Math.round((sub.score/sub.totalPoints)*100) : null;
-    }).filter(x=>x!==null);
-    const finalGrade = finalScores.length > 0
-      ? Math.round(finalScores.reduce((a,b)=>a+b,0)/finalScores.length)
-      : (finalExams.length===0 ? e.grade : null);
-    const overall = [midGrade, finalGrade].filter(x=>x!=null);
-    const overallGrade = overall.length > 0 ? Math.round(overall.reduce((a,b)=>a+b,0)/overall.length) : null;
-    const examDetails = courseExams.map(ex => {
-      const sub = mySubmissions.find(s=>s.examId===ex.id);
-      return { title:ex.title, date:ex.date, totalPoints:ex.totalPoints,
-        score: sub ? sub.score : null, pct: sub ? Math.round((sub.score/sub.totalPoints)*100) : null, status: sub?"Taken":"Not taken" };
+      const [examRes, qRes, matRes, csRes, wsRes] = await Promise.all([
+        supabase.from("exams").select("*").in("course_id", courseUuids),
+        supabase.from("exam_questions").select("*"),
+        supabase.from("materials")
+          .select("material_id,course_id,material_type,term,total_points")
+          .in("course_id", courseUuids),
+        supabase.from("class_standing").select("*")
+          .eq("student_id", user._uuid).in("course_id", courseUuids),
+        supabase.from("work_submissions")
+          .select("material_id,score,status")
+          .eq("student_id", user._uuid)
+          .eq("status", "Graded"),
+      ]);
+
+      if (examRes.data) setAllExams(examRes.data.map(r => normalizeExam({
+        ...r,
+        courses:        { course_code: uuidToCode[r.course_id] || r.course_id },
+        exam_questions: (qRes.data || []).filter(q => q.exam_id === r.exam_id),
+      })));
+      setAllMaterials(matRes.data || []);
+      setClassStandings((csRes.data || []).map(r => ({
+        courseUuid: r.course_id, term: r.term,
+        project: r.project, recitation: r.recitation, attendance: r.attendance,
+      })));
+      setWorkSubs(wsRes.data || []);
+    }
+    loadAll();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [enrollments, user._uuid]);
+
+  const cellGradeClass = (v) => v == null ? "" : v >= 90 ? "grade-cell-high" : v >= 75 ? "grade-cell-pass" : v >= 60 ? "grade-cell-warn" : "grade-cell-fail";
+
+  // Build one row per enrolled course
+  const rows = myEnrollments.map(e => {
+    const c    = courses.find(x => x.id === e.courseId) || {};
+    const cuuid = c._uuid;
+
+    const termData = {};
+    EXAM_TERMS.forEach(term => {
+      // ── Course Work (30%) ──────────────────────────────────────────────────
+      const cwMats = allMaterials.filter(m =>
+        m.course_id === cuuid && m.term === term &&
+        (m.material_type === "Lab" || m.material_type === "Assignment")
+      );
+      const cwSubs = cwMats.map(m => {
+        const ws = workSubs.find(w => w.material_id === m.material_id);
+        return ws ? ws.score : null;
+      }).filter(x => x != null);
+      const cw = cwSubs.length > 0
+        ? Math.round(cwSubs.reduce((a, b) => a + b, 0) / cwSubs.length)
+        : null;
+      const cwDetail = cwMats.map(m => ({
+        title: m.title || m.material_id,
+        score: workSubs.find(w => w.material_id === m.material_id)?.score ?? null,
+      }));
+
+      // ── Class Standing (30%) ───────────────────────────────────────────────
+      const csEntry = classStandings.find(cs => cs.courseUuid === cuuid && cs.term === term) || null;
+      const cs = csGradePct(csEntry);
+
+      // ── Exams (40%) ────────────────────────────────────────────────────────
+      const termExams = allExams.filter(ex => ex.courseId === e.courseId && ex.term === term);
+      const examSubs  = examSubmissions.filter(s => s.studentId === user.id && s.courseId === e.courseId);
+      const examScoresPct = termExams.map(ex => {
+        const sub = examSubs.find(s => s.examId === ex.id);
+        return sub ? Math.round((sub.score / sub.totalPoints) * 100) : null;
+      }).filter(x => x != null);
+      const exam = examScoresPct.length > 0
+        ? Math.round(examScoresPct.reduce((a, b) => a + b, 0) / examScoresPct.length)
+        : null;
+      const examDetail = termExams.map(ex => {
+        const sub = examSubs.find(s => s.examId === ex.id);
+        return { title: ex.title, score: sub?.score ?? null, total: ex.totalPoints,
+          pct: sub ? Math.round((sub.score / sub.totalPoints) * 100) : null };
+      });
+
+      termData[term] = {
+        cw, cwDetail, csEntry,
+        cs, exam, examDetail,
+        grade: computeTermGrade({ cw, cs, exam }),
+      };
     });
-    return { courseId:e.courseId, courseCode:c.code, courseName:c.name, teacherName:c.teacherName,
-      midGrade, finalGrade, overallGrade, examDetails,
-      status: overallGrade==null?"Pending":overallGrade>=75?"Pass":"Fail" };
+
+    const termGrades = EXAM_TERMS.map(t => termData[t].grade).filter(x => x != null);
+    const overall = termGrades.length > 0
+      ? Math.round(termGrades.reduce((a, b) => a + b, 0) / termGrades.length)
+      : null;
+
+    return {
+      courseId: e.courseId, courseCode: c.code, courseName: c.name, teacherName: c.teacherName,
+      termData, overall,
+      status: overall == null ? "Pending" : overall >= 75 ? "Pass" : "Fail",
+    };
   });
 
-  const cellGradeClass = (v) => v==null?"" : v>=90?"grade-cell-high":v>=75?"grade-cell-pass":v>=60?"grade-cell-warn":"grade-cell-fail";
-  const avg    = rows.filter(r=>r.overallGrade!=null).length
-    ? (rows.filter(r=>r.overallGrade!=null).reduce((s,r)=>s+r.overallGrade,0)/rows.filter(r=>r.overallGrade!=null).length).toFixed(1) : "—";
-  const passed = rows.filter(r=>r.status==="Pass").length;
+  const avg    = rows.filter(r => r.overall != null);
+  const gwa    = avg.length ? (avg.reduce((s, r) => s + r.overall, 0) / avg.length).toFixed(1) : "—";
+  const passed = rows.filter(r => r.status === "Pass").length;
 
-  // AG Grid Column Definitions (our custom LMSGrid format)
+  const termGradeCell = (v) => v != null
+    ? <span className={cellGradeClass(v)} style={{ display:"block", textAlign:"center", fontWeight:800, padding:"2px 6px", borderRadius:5 }}>{v}%</span>
+    : <span style={{ color:"#94a3b8", fontSize:11 }}>—</span>;
+
   const cols = [
-    { field:"courseCode",  header:"Code",    width:80 },
+    { field:"courseCode",  header:"Code",       width:72 },
     { field:"courseName",  header:"Course Name" },
-    { field:"teacherName", header:"Teacher",  width:160 },
-    { field:"midGrade",    header:"Midterm",  width:90,
-      cellRenderer: (v) => v!=null
-        ? <span className={cellGradeClass(v)} style={{display:"block",textAlign:"center",fontWeight:800,padding:"2px 6px",borderRadius:5}}>{v}%</span>
-        : <span style={{color:"#94a3b8",fontSize:11}}>Pending</span> },
-    { field:"finalGrade",  header:"Final",   width:90,
-      cellRenderer: (v) => v!=null
-        ? <span className={cellGradeClass(v)} style={{display:"block",textAlign:"center",fontWeight:800,padding:"2px 6px",borderRadius:5}}>{v}%</span>
-        : <span style={{color:"#94a3b8",fontSize:11}}>Pending</span> },
-    { field:"overallGrade",header:"Overall", width:90,
-      cellRenderer: (v) => v!=null
-        ? <span className={cellGradeClass(v)} style={{display:"block",textAlign:"center",fontWeight:900,fontSize:14,padding:"2px 6px",borderRadius:5}}>{v}%</span>
-        : <span style={{color:"#94a3b8",fontSize:11}}>—</span> },
-    { field:"status", header:"Status", width:90,
+    { field:"teacherName", header:"Teacher",    width:150 },
+    { field:"Prelim",      header:"Prelim",     width:82,  cellRenderer: (_, row) => termGradeCell(row.termData["Prelim"]?.grade) },
+    { field:"Midterm",     header:"Midterm",    width:82,  cellRenderer: (_, row) => termGradeCell(row.termData["Midterm"]?.grade) },
+    { field:"Semi-Final",  header:"Semi-Final", width:90,  cellRenderer: (_, row) => termGradeCell(row.termData["Semi-Final"]?.grade) },
+    { field:"Finals",      header:"Finals",     width:82,  cellRenderer: (_, row) => termGradeCell(row.termData["Finals"]?.grade) },
+    { field:"overall",     header:"Overall",    width:82,
+      cellRenderer: (_, row) => row.overall != null
+        ? <span className={cellGradeClass(row.overall)} style={{ display:"block", textAlign:"center", fontWeight:900, fontSize:14, padding:"2px 6px", borderRadius:5 }}>{row.overall}%</span>
+        : <span style={{ color:"#94a3b8", fontSize:11 }}>—</span> },
+    { field:"status", header:"Status", width:82,
       cellRenderer: (v) => <Badge color={v==="Pass"?"success":v==="Fail"?"danger":"default"}>{v}</Badge> },
-    { field:"courseId", header:"Detail", width:70, sortable:false,
-      cellRenderer: (_,row) => (
-        <button onClick={e=>{e.stopPropagation();setExpandedId(id=>id===row.courseId?null:row.courseId);}}
+    { field:"courseId", header:"Detail", width:72, sortable:false,
+      cellRenderer: (_, row) => (
+        <button onClick={e => { e.stopPropagation(); setExpandedId(id => id === row.courseId ? null : row.courseId); }}
           style={{ background:"none", border:"1px solid #e2e8f0", borderRadius:5, padding:"3px 9px", cursor:"pointer", fontSize:11, fontWeight:700, color:"#4f46e5", fontFamily:"inherit" }}>
-          {expandedId===row.courseId?"▲ Hide":"▼ Exams"}
+          {expandedId === row.courseId ? "▲ Hide" : "▼ Details"}
         </button>
       )},
   ];
 
   return (
     <div style={{ display:"flex", flexDirection:"column", height:"100%" }}>
-      <TopBar title="Grade Report" subtitle="Academic Performance Overview — click ▼ Exams for drill-down" />
+      <TopBar title="Grade Report" subtitle="Academic Performance Overview · Grade = CW 30% + Class Standing 30% + Exams 40%" />
       <div style={{ flex:1, padding:"16px 20px", display:"flex", flexDirection:"column", overflow:"hidden", gap:14 }}>
         {/* Stat cards */}
         <div style={{ display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:12, flexShrink:0 }}>
-          <StatCard icon="📊" label="GWA"             value={avg+(avg!=="—"?"%":"")} color="#4f46e5" bg="#ede9fe" />
-          <StatCard icon="📚" label="Courses"          value={rows.length}             color="#10b981" bg="#d1fae5" />
-          <StatCard icon="✅" label="Passing"           value={`${passed}/${rows.length}`} color="#3b82f6" bg="#dbeafe" />
-          <StatCard icon="📝" label="Exams Taken"       value={examSubmissions.filter(s=>s.studentId===user.id).length} color="#f59e0b" bg="#fef3c7" />
+          <StatCard icon="📊" label="GWA"        value={gwa+(gwa!=="—"?"%":"")}              color="#4f46e5" bg="#ede9fe" />
+          <StatCard icon="📚" label="Courses"    value={rows.length}                          color="#10b981" bg="#d1fae5" />
+          <StatCard icon="✅" label="Passing"    value={`${passed}/${rows.length}`}           color="#3b82f6" bg="#dbeafe" />
+          <StatCard icon="📝" label="Exams Taken" value={examSubmissions.filter(s=>s.studentId===user.id).length} color="#f59e0b" bg="#fef3c7" />
         </div>
 
-        {/* AG Grid with inline drill-down rows */}
+        {/* Grade table */}
         <div style={{ flex:1, overflow:"hidden", border:"1px solid #e2e8f0", borderRadius:8, background:"#fff", display:"flex", flexDirection:"column" }}>
-          {/* Grid header */}
           <div style={{ flexShrink:0 }}>
             <table style={{ width:"100%", borderCollapse:"collapse" }}>
               <thead>
                 <tr style={{ background:"#1e293b" }}>
-                  {cols.map(col=>(
+                  {cols.map(col => (
                     <th key={col.field+col.header} style={{ padding:"9px 12px", textAlign:"left", fontWeight:700, fontSize:10, letterSpacing:"0.07em", textTransform:"uppercase", color:"#94a3b8", whiteSpace:"nowrap", width:col.width||"auto" }}>
                       {col.header}
                     </th>
@@ -2235,74 +2873,107 @@ function StudentGrades({ user, courses, examSubmissions }) {
               </thead>
             </table>
           </div>
-          {/* Scrollable body */}
           <div style={{ flex:1, overflowY:"auto" }}>
             <table style={{ width:"100%", borderCollapse:"collapse", fontSize:13 }}>
               <tbody>
                 {rows.map((row, i) => (
-                  <>
-                    {/* Main row */}
-                    <tr key={row.courseId} style={{ background:i%2===0?"#fff":"#f8fafc", borderBottom:"1px solid #f1f5f9", cursor:"default" }}>
-                      {cols.map(col=>(
+                  <React.Fragment key={row.courseId}>
+                    <tr style={{ background:i%2===0?"#fff":"#f8fafc", borderBottom:"1px solid #f1f5f9" }}>
+                      {cols.map(col => (
                         <td key={col.field+col.header} style={{ padding:"9px 12px", verticalAlign:"middle", width:col.width||"auto" }}>
-                          {col.cellRenderer ? col.cellRenderer(row[col.field], row) : (row[col.field]??"—")}
+                          {col.cellRenderer ? col.cellRenderer(row[col.field], row) : (row[col.field] ?? "—")}
                         </td>
                       ))}
                     </tr>
-                    {/* Drill-down sub-row */}
-                    {expandedId===row.courseId && (
-                      <tr key={row.courseId+"-drill"} className="drill-row">
-                        <td colSpan={cols.length} style={{ padding:"0 12px 12px 40px" }}>
-                          <div style={{ background:"#f0f9ff", border:"1px solid #bae6fd", borderRadius:8, padding:"10px 14px" }}>
-                            <div style={{ fontSize:10, fontWeight:800, color:"#0369a1", textTransform:"uppercase", letterSpacing:"0.07em", marginBottom:8 }}>
-                              📋 Exam Breakdown — {row.courseName}
+
+                    {/* ── Drill-down: per-term breakdown ── */}
+                    {expandedId === row.courseId && (
+                      <tr className="drill-row">
+                        <td colSpan={cols.length} style={{ padding:"0 12px 16px 28px" }}>
+                          <div style={{ background:"#f8fafc", border:"1px solid #e2e8f0", borderRadius:10, overflow:"hidden" }}>
+                            {/* Formula reminder strip */}
+                            <div style={{ background:"#1e293b", padding:"8px 16px", display:"flex", gap:20 }}>
+                              {[["📚 Course Work","30%","#818cf8"],["🏆 Class Standing","30%","#34d399"],["📝 Exams","40%","#fb923c"]].map(([lbl,pct,col])=>(
+                                <div key={lbl} style={{ display:"flex", alignItems:"center", gap:6, fontSize:11, color:col, fontWeight:700 }}>
+                                  <span>{lbl}</span>
+                                  <span style={{ background:"rgba(255,255,255,.12)", borderRadius:9999, padding:"1px 7px" }}>{pct}</span>
+                                </div>
+                              ))}
                             </div>
-                            {row.examDetails.length===0
-                              ? <div style={{fontSize:12,color:"#94a3b8"}}>No exams for this course.</div>
-                              : (
-                                <table style={{ width:"100%", borderCollapse:"collapse", fontSize:12 }}>
-                                  <thead>
-                                    <tr style={{ background:"rgba(3,105,161,.08)" }}>
-                                      {["Exam","Date","Total Pts","Your Score","Percentage","Status"].map(h=>(
-                                        <th key={h} style={{ padding:"5px 10px", textAlign:"left", fontSize:9, fontWeight:800, color:"#0369a1", textTransform:"uppercase", letterSpacing:"0.06em" }}>{h}</th>
-                                      ))}
-                                    </tr>
-                                  </thead>
-                                  <tbody>
-                                    {row.examDetails.map((ex,j)=>(
-                                      <tr key={j} style={{ borderBottom:"1px solid rgba(3,105,161,.1)" }}>
-                                        <td style={{ padding:"6px 10px", fontWeight:700, color:"#1e293b" }}>{ex.title}</td>
-                                        <td style={{ padding:"6px 10px", color:"#64748b" }}>{ex.date}</td>
-                                        <td style={{ padding:"6px 10px", color:"#64748b" }}>{ex.totalPoints}</td>
-                                        <td style={{ padding:"6px 10px" }}>
-                                          {ex.score!=null ? <strong style={{color:gradeColor(ex.pct)}}>{ex.score}</strong> : <span style={{color:"#94a3b8"}}>—</span>}
-                                        </td>
-                                        <td style={{ padding:"6px 10px" }}>
-                                          {ex.pct!=null
-                                            ? <span className={cellGradeClass(ex.pct)} style={{padding:"1px 6px",borderRadius:4,display:"inline-block"}}>{ex.pct}%</span>
-                                            : <span style={{color:"#94a3b8"}}>—</span>}
-                                        </td>
-                                        <td style={{ padding:"6px 10px" }}>
-                                          <Badge color={ex.status==="Taken"?"info":"default"}>{ex.status}</Badge>
-                                        </td>
-                                      </tr>
+
+                            {/* Per-term sections */}
+                            <div style={{ display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:0 }}>
+                              {EXAM_TERMS.map((term, ti) => {
+                                const td    = row.termData[term];
+                                const tm    = TERM_META[term];
+                                const hasCS = td.csEntry && csGradePct(td.csEntry) != null;
+                                return (
+                                  <div key={term} style={{ padding:"12px 14px", borderRight:ti<3?"1px solid #e2e8f0":"none", borderTop:"1px solid #e2e8f0" }}>
+                                    {/* Term badge + computed grade */}
+                                    <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:10 }}>
+                                      <span style={{ fontSize:10, fontWeight:800, color:tm.color, background:tm.bg, padding:"2px 8px", borderRadius:9999 }}>{term}</span>
+                                      {td.grade != null
+                                        ? <span className={cellGradeClass(td.grade)} style={{ fontSize:15, fontWeight:900, padding:"2px 8px", borderRadius:6 }}>{td.grade}%</span>
+                                        : <span style={{ fontSize:11, color:"#94a3b8" }}>Pending</span>}
+                                    </div>
+
+                                    {/* Component rows */}
+                                    {[
+                                      { label:"📚 Course Work", pct:td.cw,   weight:"30%" },
+                                      { label:"🏆 Class Standing", pct:td.cs, weight:"30%" },
+                                      { label:"📝 Exams",       pct:td.exam, weight:"40%" },
+                                    ].map(({ label, pct, weight }) => (
+                                      <div key={label} style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:5 }}>
+                                        <div style={{ fontSize:10, color:"#64748b", fontWeight:600 }}>{label}</div>
+                                        <div style={{ display:"flex", alignItems:"center", gap:5 }}>
+                                          <span style={{ fontSize:9, color:"#94a3b8" }}>{weight}</span>
+                                          {pct != null
+                                            ? <span style={{ fontSize:12, fontWeight:800, color:gradeColor(pct) }}>{pct}%</span>
+                                            : <span style={{ fontSize:10, color:"#cbd5e1" }}>—</span>}
+                                        </div>
+                                      </div>
                                     ))}
-                                  </tbody>
-                                </table>
-                              )
-                            }
+
+                                    {/* Class Standing detail */}
+                                    {hasCS && (
+                                      <div style={{ marginTop:6, background:"#f0fdf4", border:"1px solid #bbf7d0", borderRadius:6, padding:"5px 8px" }}>
+                                        {[["Project", td.csEntry?.project],["Recitation", td.csEntry?.recitation],["Attendance", td.csEntry?.attendance]].map(([lbl,v])=>(
+                                          <div key={lbl} style={{ display:"flex", justifyContent:"space-between", fontSize:10, color:"#065f46", marginBottom:2 }}>
+                                            <span>{lbl}</span>
+                                            <span style={{ fontWeight:700 }}>{v != null ? `${v}/100` : "—"}</span>
+                                          </div>
+                                        ))}
+                                      </div>
+                                    )}
+
+                                    {/* Exam list */}
+                                    {td.examDetail.length > 0 && (
+                                      <div style={{ marginTop:6 }}>
+                                        {td.examDetail.map((ex, j) => (
+                                          <div key={j} style={{ fontSize:10, color:"#64748b", display:"flex", justifyContent:"space-between", marginBottom:2 }}>
+                                            <span style={{ overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", maxWidth:80 }} title={ex.title}>{ex.title}</span>
+                                            <span style={{ fontWeight:700, color:ex.pct!=null?gradeColor(ex.pct):"#94a3b8" }}>
+                                              {ex.pct != null ? `${ex.pct}%` : "—"}
+                                            </span>
+                                          </div>
+                                        ))}
+                                      </div>
+                                    )}
+                                  </div>
+                                );
+                              })}
+                            </div>
                           </div>
                         </td>
                       </tr>
                     )}
-                  </>
+                  </React.Fragment>
                 ))}
               </tbody>
             </table>
           </div>
-          {/* Footer */}
           <div style={{ padding:"7px 12px", borderTop:"1px solid #e2e8f0", background:"#f8fafc", fontSize:11, color:"#64748b", flexShrink:0 }}>
-            {rows.length} course{rows.length!==1?"s":""} · Click "▼ Exams" to expand exam scores
+            {rows.length} course{rows.length!==1?"s":""} · Click "▼ Details" to see per-term grade breakdown
           </div>
         </div>
       </div>
@@ -2310,18 +2981,18 @@ function StudentGrades({ user, courses, examSubmissions }) {
   );
 }
 
-function StudentDashboard({ user, onLogout, courses, examSubmissions, onSubmitExam }) {
-  const enrollments = INIT_ENROLLMENTS.filter(e => e.studentId===user.id);
+function StudentDashboard({ user, onLogout, courses, examSubmissions, onSubmitExam, enrollments }) {
+  const myEnrollments = enrollments.filter(e => e.studentId===user.id);
   const [page, setPage] = useState("courses");
   const nav = [
-    { id:"courses", label:"My Courses",   icon:"📚", badge:enrollments.length },
+    { id:"courses", label:"My Courses",   icon:"📚", badge:myEnrollments.length },
     { id:"profile", label:"My Profile",   icon:"👤", badge:null },
     { id:"grades",  label:"Grade Report", icon:"📊", badge:null },
   ];
   const pages = {
-    courses: <StudentCourses user={user} courses={courses} onSubmitExam={onSubmitExam} examSubmissions={examSubmissions} />,
+    courses: <StudentCourses user={user} courses={courses} onSubmitExam={onSubmitExam} examSubmissions={examSubmissions} enrollments={enrollments} />,
     profile: <StudentProfile user={user} />,
-    grades:  <StudentGrades  user={user} courses={courses} examSubmissions={examSubmissions} />,
+    grades:  <StudentGrades  user={user} courses={courses} examSubmissions={examSubmissions} enrollments={enrollments} />,
   };
   return (
     <div style={{ display:"flex", height:"100vh", overflow:"hidden" }}>
@@ -2380,6 +3051,8 @@ const ExamSchema = {
     const errors = [];
     if (!exam.title || exam.title.trim().length < 3)
       errors.push("Exam title must be at least 3 characters.");
+    if (!exam.term)
+      errors.push("Term is required — select Prelim, Midterm, Semi-Final, or Finals.");
     if (!exam.date)
       errors.push("Exam date is required.");
     if (!exam.questions || exam.questions.length === 0)
@@ -2662,6 +3335,7 @@ function ExamBuilder({ course, initialExam, onSave, onBack }) {
   const [title,    setTitle]    = useState(initialExam?.title    || "");
   const [date,     setDate]     = useState(initialExam?.date     || "");
   const [duration, setDuration] = useState(initialExam?.duration || "");
+  const [term,     setTerm]     = useState(initialExam?.term     || "");
 
   // ── examQuestions — the core array state ──
   // Each item: { id, type, questionText, points, correctAnswer, options? }
@@ -2718,7 +3392,7 @@ function ExamBuilder({ course, initialExam, onSave, onBack }) {
 
   // ── Validation + Save ──
   const handleSave = () => {
-    const examData = { title, date, duration, questions: examQuestions,
+    const examData = { title, date, duration, term: term || null, questions: examQuestions,
       totalPoints: totalPts, id:`EX${Date.now()}`, courseId:course.id,
       createdAt: new Date().toISOString() };
     const result = ExamSchema.validate(examData);
@@ -2761,6 +3435,14 @@ function ExamBuilder({ course, initialExam, onSave, onBack }) {
           onFocus={e=>e.target.style.borderColor="#6366f1"}
           onBlur={e=>e.target.style.borderColor="#e2e8f0"}
         />
+        <div style={{ flex:1, position:"relative", minWidth:0 }}>
+          <select value={term} onChange={e=>setTerm(e.target.value)}
+            style={{ width:"100%", border:`1.5px solid ${term ? "#e2e8f0" : "#ef4444"}`, borderRadius:7, padding:"7px 11px", fontSize:13, fontFamily:"inherit", color: term ? "#0f172a" : "#94a3b8", outline:"none", background:"#fff", cursor:"pointer", appearance:"auto" }}>
+            <option value="" disabled>— Term (required) —</option>
+            {EXAM_TERMS.map(t=><option key={t} value={t}>{t}</option>)}
+          </select>
+          {!term && <span style={{ position:"absolute", top:-6, right:6, fontSize:10, fontWeight:800, color:"#ef4444", background:"#fff", padding:"0 3px" }}>required</span>}
+        </div>
         <Input type="date" value={date} onChange={e=>setDate(e.target.value)} style={{ flex:1, minWidth:0 }} />
         <Input value={duration} onChange={e=>setDuration(e.target.value)} placeholder="Duration (e.g. 2 hours)" style={{ flex:1, minWidth:0 }} />
         {/* Live point counter */}
@@ -2960,14 +3642,22 @@ function GradingModal({ submission, onSave, onClose }) {
                 </div>
               ))}
             </div>
-            {/* Mock "View File" — simulates opening the PDF */}
+            {/* View / Download the submitted file */}
             {submission.fileName && (
               <div style={{ marginTop:10 }}>
-                <Btn variant="ghost" size="sm"
-                  style={{ border:"1px solid #c7d2fe" }}
-                  onClick={() => alert(`[Mock] Opening "${submission.fileName}" in PDF viewer.\n\nIn production this would open the file stored in cloud storage (e.g. S3 presigned URL).`)}>
-                  👁 View Submitted File
-                </Btn>
+                {submission.fileUrl
+                  ? (
+                    <Btn variant="ghost" size="sm"
+                      style={{ border:"1px solid #c7d2fe" }}
+                      onClick={() => window.open(submission.fileUrl, "_blank", "noopener,noreferrer")}>
+                      👁 View Submitted File
+                    </Btn>
+                  ) : (
+                    <span style={{ fontSize:11, color:"#94a3b8", fontStyle:"italic" }}>
+                      ⚠ File recorded (pre-storage) — no URL available
+                    </span>
+                  )
+                }
               </div>
             )}
           </div>
@@ -3037,10 +3727,80 @@ function GradingModal({ submission, onSave, onClose }) {
 // ── TeacherGradingDashboard ───────────────────────────────────────────────────
 // Right pane for Lab/Assignment detail. Shows enrolled students, submission
 // status, submitted-at date, and a "View & Grade" action per row.
-function TeacherGradingDashboard({ material, courseId, allUsers, gradeEntries, onGradeUpdate }) {
-  const [roster,      setRoster]      = useState(() => buildSubmissionRoster(material.id, courseId, allUsers));
-  const [modalSub,    setModalSub]    = useState(null);  // null = closed
-  const [savedToast,  setSavedToast]  = useState("");
+// Uses Supabase Realtime to push new/updated submissions to the teacher live.
+function TeacherGradingDashboard({ material, courseId, allUsers, user, gradeEntries, onGradeUpdate, enrollments }) {
+  const [roster,       setRoster]     = useState([]);
+  const [modalSub,     setModalSub]   = useState(null);
+  const [savedToast,   setSavedToast] = useState("");
+  const [refreshing,   setRefreshing] = useState(false);
+  const [lastUpdated,  setLastUpdated] = useState(null);
+
+  // ── Core roster fetch ───────────────────────────────────────────────────────
+  const loadRoster = useRef(null);
+  loadRoster.current = async () => {
+    setRefreshing(true);
+    const { data: subs } = await supabase
+      .from("work_submissions")
+      .select("*")
+      .eq("material_id", material.id);
+
+    const submissionsByUuid = {};
+    (subs || []).forEach(r => { submissionsByUuid[r.student_id] = r; });
+
+    const enrolled = (enrollments || []).filter(e => e.courseId === courseId);
+    const rows = enrolled.map(e => {
+      const userObj = allUsers.find(u => u.id === e.studentId);
+      const sub     = submissionsByUuid[userObj?._uuid];
+      return sub
+        ? { id: sub.submission_id, materialId: material.id,
+            studentId:   e.studentId,
+            studentName: userObj?.fullName || e.studentId,
+            fileName:    sub.file_name,
+            fileSize:    sub.file_size_kb ? sub.file_size_kb * 1024 : null,
+            fileUrl:     sub.file_url    || null,
+            submittedAt: sub.submitted_at,
+            status:      sub.status,          // 'Submitted' | 'Late' | 'Graded'
+            grade:       sub.score,           // DB column is `score`
+            feedback:    sub.feedback }
+        : { id: null, materialId: material.id,
+            studentId:   e.studentId,
+            studentName: userObj?.fullName || e.studentId,
+            fileName: null, fileSize: null, submittedAt: null,
+            fileUrl: null, status: "Pending", grade: null, feedback: null };
+    });
+    setRoster(rows);
+    setLastUpdated(new Date());
+    setRefreshing(false);
+  };
+
+  // Initial load + reload whenever material or enrollments change
+  useEffect(() => {
+    loadRoster.current();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [material.id, enrollments]);
+
+  // ── Supabase Realtime — live push when any student submits/updates ──────────
+  useEffect(() => {
+    const channel = supabase
+      .channel(`work_submissions:material_${material.id}`)
+      .on(
+        "postgres_changes",
+        {
+          event:  "*",              // INSERT and UPDATE
+          schema: "public",
+          table:  "work_submissions",
+          filter: `material_id=eq.${material.id}`,
+        },
+        () => {
+          // Re-fetch the full roster whenever any submission row changes
+          loadRoster.current();
+        }
+      )
+      .subscribe();
+
+    return () => { supabase.removeChannel(channel); };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [material.id]);
 
   // Merge any in-session grade updates back into the roster display
   const displayRoster = roster.map(r => {
@@ -3057,11 +3817,34 @@ function TeacherGradingDashboard({ material, courseId, allUsers, gradeEntries, o
     ? new Date(iso).toLocaleString("en-US",{month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"})
     : "—";
 
-  const handleSaveGrade = (updated) => {
+  const handleSaveGrade = async (updated) => {
+    const g = updated.grade != null ? Number(updated.grade) : null;
+
+    // Write to Supabase
+    const { error } = await supabase
+      .from("work_submissions")
+      .update({
+        score:      g,
+        feedback:   updated.feedback ?? null,
+        status:     g != null ? "Graded" : updated.status,
+        graded_by:  user?._uuid ?? null,
+        graded_at:  new Date().toISOString(),
+      })
+      .eq("submission_id", updated.id);
+
+    if (error) {
+      setSavedToast(`❌ Save failed: ${error.message}`);
+      setTimeout(() => setSavedToast(""), 3500);
+      return;
+    }
+
+    // Optimistically update local roster (Realtime will also re-sync shortly)
     setRoster(prev => prev.map(r =>
-      r.studentId === updated.studentId ? { ...updated, status: updated.grade != null ? "Graded" : updated.status } : r
+      r.studentId === updated.studentId
+        ? { ...updated, grade: g, status: g != null ? "Graded" : updated.status }
+        : r
     ));
-    onGradeUpdate(updated);
+    onGradeUpdate({ ...updated, grade: g, status: g != null ? "Graded" : updated.status });
     setModalSub(null);
     setSavedToast(`Grade saved for ${updated.studentName}`);
     setTimeout(() => setSavedToast(""), 2500);
@@ -3073,8 +3856,25 @@ function TeacherGradingDashboard({ material, courseId, allUsers, gradeEntries, o
     <div style={{ display:"flex", flexDirection:"column", height:"100%", overflow:"hidden" }}>
       {/* Section header */}
       <div style={{ padding:"9px 15px", borderBottom:"1px solid #f1f5f9", background:"#fafafe", flexShrink:0, display:"flex", alignItems:"center", justifyContent:"space-between" }}>
-        <span style={{ fontSize:10, fontWeight:800, color:"#64748b", textTransform:"uppercase", letterSpacing:"0.07em" }}>📋 Submissions & Grading</span>
-        {savedToast && <span style={{ fontSize:11, fontWeight:700, color:"#065f46", background:"#d1fae5", padding:"3px 8px", borderRadius:5 }}>✓ {savedToast}</span>}
+        <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+          <span style={{ fontSize:10, fontWeight:800, color:"#64748b", textTransform:"uppercase", letterSpacing:"0.07em" }}>📋 Submissions & Grading</span>
+          {/* Live indicator */}
+          <span style={{ display:"flex", alignItems:"center", gap:4, fontSize:10, fontWeight:700, color:"#10b981" }}>
+            <span style={{ width:6, height:6, borderRadius:"50%", background:"#10b981", display:"inline-block",
+              animation:"timerPulse 2s infinite" }} />
+            Live
+          </span>
+        </div>
+        <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+          {savedToast && <span style={{ fontSize:11, fontWeight:700, color:"#065f46", background:"#d1fae5", padding:"3px 8px", borderRadius:5 }}>✓ {savedToast}</span>}
+          {lastUpdated && <span style={{ fontSize:10, color:"#94a3b8" }}>Updated {lastUpdated.toLocaleTimeString("en-US",{hour:"2-digit",minute:"2-digit"})}</span>}
+          <button
+            onClick={() => loadRoster.current()}
+            disabled={refreshing}
+            style={{ display:"flex", alignItems:"center", gap:4, padding:"3px 9px", border:"1px solid #e2e8f0", borderRadius:5, background:"#fff", cursor:refreshing?"not-allowed":"pointer", fontSize:11, fontWeight:700, color:"#4f46e5", fontFamily:"inherit", opacity:refreshing?.6:1 }}>
+            {refreshing ? "⟳ Refreshing…" : "⟳ Refresh"}
+          </button>
+        </div>
       </div>
 
       {/* Stats strip */}
@@ -3165,30 +3965,69 @@ function TeacherLectureDetailView({ material, onUpdate }) {
   const [editDesc,  setEditDesc]  = useState(material.description || "");
   const [editContent, setEditContent] = useState(material.content || "");
   const [uploadedFile, setUploadedFile] = useState(null);
+  const [saving,    setSaving]    = useState(false);
   const [toast,     setToast]     = useState("");
   const fileRef = useRef(null);
 
   const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(""), 2500); };
 
-  // Mock file upload handler — simulates PDF/DOCX processing pipeline
+  // Sync local edit-state whenever the material prop changes (e.g. after a save
+  // propagates back down from the parent via setSelectedMaterial).
+  useEffect(() => {
+    setEditTitle(material.title);
+    setEditDesc(material.description || "");
+    setEditContent(material.content || "");
+    setUploadedFile(null);
+  }, [material.id, material.attachment_url]);
+
+  // Stage the file — actual bytes uploaded in saveChanges() once we confirm intent to save
+  const [pendingAttachment, setPendingAttachment] = useState(null);
+
   const handleFileUpload = (file) => {
     if (!file) return;
     const allowed = ["application/pdf","application/msword","application/vnd.openxmlformats-officedocument.wordprocessingml.document"];
-    if (!allowed.includes(file.type) && ![".pdf",".doc",".docx"].some(e=>file.name.endsWith(e))) {
+    if (!allowed.includes(file.type) && ![".pdf",".doc",".docx"].some(e=>file.name.toLowerCase().endsWith(e))) {
       showToast("Only PDF and Word files are accepted."); return;
     }
-    // Simulate async upload: set a loading delay, then "complete"
-    showToast(`Uploading "${file.name}"…`);
-    setTimeout(() => {
-      setUploadedFile(file);
-      showToast(`"${file.name}" uploaded successfully!`);
-    }, 800);
+    setPendingAttachment(file);
+    setUploadedFile(file);  // keeps UI display in sync
+    showToast(`"${file.name}" staged — will upload on Save.`);
   };
 
-  const saveChanges = () => {
-    const updated = { ...material, title: editTitle, description: editDesc, content: editContent,
-      ...(uploadedFile ? { attachmentName: uploadedFile.name } : {}) };
-    onUpdate(updated);
+  const saveChanges = async () => {
+    setSaving(true);
+    // Use attachment_name (snake_case) — that is how normalizeMaterial stores it
+    let attachmentUrl  = material.attachment_url   || null;
+    let attachmentName = material.attachment_name  || null;
+
+    // ── Upload to Supabase Storage if a new file was staged ────────────────────
+    if (pendingAttachment instanceof File) {
+      const storagePath = `${material.id}/${Date.now()}_${safeFileName(pendingAttachment.name)}`;
+      try {
+        showToast("Uploading attachment…");
+        attachmentUrl  = await uploadFileToStorage("materials", storagePath, pendingAttachment);
+        attachmentName = pendingAttachment.name;
+      } catch (err) {
+        showToast("Upload failed: " + err.message);
+        setSaving(false);
+        return;
+      }
+      setPendingAttachment(null);
+    }
+
+    const updated = {
+      ...material,
+      title:           editTitle,
+      description:     editDesc,
+      content:         editContent,
+      attachment_name: attachmentName,   // keep snake_case to match normalizer
+      attachmentName:  attachmentName,   // camelCase alias used by handleMaterialUpdate DB write
+      attachment_url:  attachmentUrl,
+    };
+    // Await so the parent's setSelectedMaterial fires before we flip editMode off,
+    // ensuring the view mode immediately reflects the saved state.
+    await onUpdate(updated);
+    setSaving(false);
     setEditMode(false);
     showToast("Material updated successfully!");
   };
@@ -3212,10 +4051,10 @@ function TeacherLectureDetailView({ material, onUpdate }) {
           {/* View / Edit toggle */}
           <div style={{ display:"flex", gap:6, flexShrink:0 }}>
             {toast && <span style={{ fontSize:11, fontWeight:700, color:"#065f46", background:"#d1fae5", padding:"4px 9px", borderRadius:5, alignSelf:"center" }}>✓ {toast}</span>}
-            <Btn variant={editMode ? "danger" : "secondary"} size="sm" onClick={() => { setEditMode(e=>!e); setToast(""); }}>
+            <Btn variant={editMode ? "danger" : "secondary"} size="sm" onClick={() => { if (!saving) { setEditMode(e=>!e); setToast(""); } }}>
               {editMode ? "✕ Cancel" : "✏ Edit Material"}
             </Btn>
-            {editMode && <Btn size="sm" onClick={saveChanges}>💾 Save Changes</Btn>}
+            {editMode && <Btn size="sm" onClick={saveChanges} disabled={saving}>{saving ? "⏳ Saving…" : "💾 Save Changes"}</Btn>}
           </div>
         </div>
       </div>
@@ -3241,8 +4080,12 @@ function TeacherLectureDetailView({ material, onUpdate }) {
               <input ref={fileRef} type="file" accept=".pdf,.doc,.docx" style={{ display:"none" }}
                 onChange={e => handleFileUpload(e.target.files?.[0])} />
               <Btn variant="secondary" size="sm" onClick={() => fileRef.current?.click()}>📎 Choose File</Btn>
-              {uploadedFile && <span style={{ fontSize:12, color:"#065f46", fontWeight:600 }}>✓ {uploadedFile.name}</span>}
-              {!uploadedFile && material.attachmentName && <span style={{ fontSize:12, color:"#64748b" }}>Current: {material.attachmentName}</span>}
+              {uploadedFile
+                ? <span style={{ fontSize:12, color:"#065f46", fontWeight:600 }}>✓ {uploadedFile.name}</span>
+                : material.attachment_name
+                  ? <span style={{ fontSize:12, color:"#64748b" }}>Current: <strong style={{ color:"#0369a1" }}>{material.attachment_name}</strong></span>
+                  : <span style={{ fontSize:12, color:"#94a3b8", fontStyle:"italic" }}>No attachment yet</span>
+              }
             </div>
           </div>
         </div>
@@ -3255,6 +4098,25 @@ function TeacherLectureDetailView({ material, onUpdate }) {
               : <p style={{ color:"#94a3b8", fontStyle:"italic" }}>No content yet. Click "Edit Material" to add content.</p>
             }
           </div>
+          {/* Attachment preview — mirrors student LectureView */}
+          {(material.attachment_url || material.attachment_name) && (
+            <div style={{ marginTop:18, padding:"11px 14px", background:"#f0f9ff", border:"1px solid #bae6fd", borderRadius:8, display:"flex", alignItems:"center", gap:10 }}>
+              <span style={{ fontSize:18 }}>{fileIcon(material.attachment_name)}</span>
+              <div style={{ flex:1, minWidth:0 }}>
+                <div style={{ fontSize:12, fontWeight:700, color:"#0369a1", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>
+                  {material.attachment_name || "Attachment"}
+                </div>
+                <div style={{ fontSize:10, color:"#64748b" }}>Attached file</div>
+              </div>
+              {material.attachment_url
+                ? <Btn variant="ghost" size="sm" style={{ border:"1px solid #7dd3fc" }}
+                    onClick={() => window.open(material.attachment_url, "_blank", "noopener,noreferrer")}>
+                    ⬇ Download
+                  </Btn>
+                : <span style={{ fontSize:11, color:"#94a3b8", fontStyle:"italic" }}>Staged — not yet saved</span>
+              }
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -3263,7 +4125,7 @@ function TeacherLectureDetailView({ material, onUpdate }) {
 
 // ── TeacherAssignmentDetailView ───────────────────────────────────────────────
 // Dual-pane: left = instructions (+ edit mode), right = grading dashboard.
-function TeacherAssignmentDetailView({ material, courseId, allUsers, onUpdate, gradeEntries, onGradeUpdate }) {
+function TeacherAssignmentDetailView({ material, courseId, allUsers, user, onUpdate, gradeEntries, onGradeUpdate, enrollments }) {
   const [editMode,    setEditMode]    = useState(false);
   const [editTitle,   setEditTitle]   = useState(material.title);
   const [editContent, setEditContent] = useState(material.content || "");
@@ -3275,16 +4137,39 @@ function TeacherAssignmentDetailView({ material, courseId, allUsers, onUpdate, g
 
   const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(""), 2500); };
 
-  // Mock file upload — same pipeline simulation as Lecture view
+  // Stage the file — actual bytes uploaded in saveChanges()
+  const [pendingAttachment, setPendingAttachment] = useState(null);
+
+  // Real file upload — stages the File object; bytes are sent on Save
   const handleFileUpload = (file) => {
     if (!file) return;
-    showToast(`Uploading "${file.name}"…`);
-    setTimeout(() => { setUploadedFile(file); showToast(`"${file.name}" uploaded!`); }, 800);
+    setPendingAttachment(file);
+    setUploadedFile(file);
+    showToast(`"${file.name}" staged — will upload on Save.`);
   };
 
-  const saveChanges = () => {
-    onUpdate({ ...material, title:editTitle, content:editContent, dueDate:editDue, points:Number(editPoints)||material.points,
-      ...(uploadedFile ? { attachmentName:uploadedFile.name } : {}) });
+  const saveChanges = async () => {
+    let attachmentUrl  = material.attachment_url  || null;
+    let attachmentName = material.attachmentName  || null;
+
+    // ── Upload to Supabase Storage if a new file was staged ────────────────────
+    if (pendingAttachment instanceof File) {
+      const storagePath = `${material.id}/${Date.now()}_${safeFileName(pendingAttachment.name)}`;
+      try {
+        showToast("Uploading attachment…");
+        attachmentUrl  = await uploadFileToStorage("materials", storagePath, pendingAttachment);
+        attachmentName = pendingAttachment.name;
+      } catch (err) {
+        showToast("Upload failed: " + err.message);
+        return;
+      }
+      setPendingAttachment(null);
+    } else if (uploadedFile) {
+      attachmentName = uploadedFile.name;
+    }
+
+    onUpdate({ ...material, title:editTitle, content:editContent, dueDate:editDue,
+      points:Number(editPoints)||material.points, attachmentName, attachment_url: attachmentUrl });
     setEditMode(false); showToast("Assignment updated!");
   };
 
@@ -3367,8 +4252,10 @@ function TeacherAssignmentDetailView({ material, courseId, allUsers, onUpdate, g
             material={material}
             courseId={courseId}
             allUsers={allUsers}
+            user={user}
             gradeEntries={gradeEntries}
             onGradeUpdate={onGradeUpdate}
+            enrollments={enrollments}
           />
         </div>
       </div>
@@ -3380,7 +4267,7 @@ function TeacherAssignmentDetailView({ material, courseId, allUsers, onUpdate, g
 // Root container for teacher material detail.
 // Mirrors the student MaterialDetailView structure with breadcrumb + conditional render.
 // Ternary: isSubmittable(type) → TeacherAssignmentDetailView : TeacherLectureDetailView
-function TeacherMaterialDetailView({ material, course, allUsers, onBack, onUpdate, gradeEntries, onGradeUpdate }) {
+function TeacherMaterialDetailView({ material, course, allUsers, user, onBack, onUpdate, gradeEntries, onGradeUpdate, enrollments }) {
   const showAssignmentLayout = isSubmittable(material.type);
 
   return (
@@ -3411,9 +4298,11 @@ function TeacherMaterialDetailView({ material, course, allUsers, onBack, onUpdat
             material={material}
             courseId={course?.id}
             allUsers={allUsers}
+            user={user}
             onUpdate={onUpdate}
             gradeEntries={gradeEntries}
             onGradeUpdate={onGradeUpdate}
+            enrollments={enrollments}
           />
         : <TeacherLectureDetailView
             material={material}
@@ -3425,18 +4314,43 @@ function TeacherMaterialDetailView({ material, course, allUsers, onBack, onUpdat
 }
 
 // ── TeacherCourses ────────────────────────────────────────────────────────────
-function TeacherCourses({ user, courses, allUsers }) {
+function TeacherCourses({ user, courses, allUsers, enrollments }) {
   const myCourses = courses.filter(c => c.teacher === user.id);
 
   // Course list state
   const [sel,    setSel]    = useState(null);
   const [tab,    setTab]    = useState("materials");
-  const [materials, setMats]= useState(INIT_MATERIALS);
-  const [exams,  setExams]  = useState(INIT_EXAMS);
-  const [matF,   setMatF]   = useState({ title:"", type:"Lecture", description:"" });
+  const [materials, setMats]= useState([]);
+  const [exams,  setExams]  = useState([]);
+  const [matF,   setMatF]   = useState({ title:"", type:"Lecture", term:"", description:"" });
   const [exF,    setExF]    = useState({ title:"", date:"", duration:"", totalPoints:"100" });
   const [toast,  setToast]  = useState("");
   const fileRef = useRef(null);
+
+  // ── Load materials and exams from Supabase when teacher's courses load ──
+  useEffect(() => {
+    async function loadTeacherData() {
+      const uuidToCode = {};
+      courses.forEach(c => { if (c._uuid) uuidToCode[c._uuid] = c.id; });
+      const courseUuids = myCourses.map(c => c._uuid).filter(Boolean);
+      if (!courseUuids.length) return;
+      const [matRes, examRes, qRes] = await Promise.all([
+        supabase.from("materials").select("*").in("course_id", courseUuids),
+        supabase.from("exams").select("*").in("course_id", courseUuids),
+        supabase.from("exam_questions").select("*"),
+      ]);
+      if (matRes.data)  setMats(matRes.data.map(r => normalizeMaterial({
+        ...r, courses: { course_code: uuidToCode[r.course_id] || r.course_id }
+      })));
+      if (examRes.data) setExams(examRes.data.map(r => normalizeExam({
+        ...r,
+        courses:        { course_code: uuidToCode[r.course_id] || r.course_id },
+        exam_questions: (qRes.data || []).filter(q => q.exam_id === r.exam_id),
+      })));
+    }
+    loadTeacherData();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [courses]);
 
   // ── selectedMaterial state — null = course list, object = detail view ──
   const [selectedMaterial,  setSelectedMaterial]  = useState(null);
@@ -3447,25 +4361,73 @@ function TeacherCourses({ user, courses, allUsers }) {
 
   const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(""), 2500); };
 
-  // Mock file upload for "Add Material" form
+  // Holds the actual File object between file-picker selection and addMat() call
+  const [pendingFile, setPendingFile] = useState(null);
+
+  // Validate and stage the file — actual upload happens in addMat() once we have the material UUID
   const handleFileUpload = (file) => {
     if (!file) return;
     const allowed = [".pdf",".doc",".docx"];
-    if (!allowed.some(ext => file.name.endsWith(ext))) { showToast("Only PDF/DOCX accepted."); return; }
-    showToast(`Attaching "${file.name}"…`);
-    setTimeout(() => {
-      setMatF(f => ({ ...f, attachmentName: file.name }));
-      showToast(`"${file.name}" ready to submit.`);
-    }, 600);
+    if (!allowed.some(ext => file.name.toLowerCase().endsWith(ext))) {
+      showToast("Only PDF/DOCX accepted."); return;
+    }
+    setPendingFile(file);
+    setMatF(f => ({ ...f, attachmentName: file.name }));
+    showToast(`"${file.name}" staged — will upload when you click Add Material.`);
   };
 
-  const addMat = () => {
+  const addMat = async () => {
     if (!matF.title.trim() || !sel) return;
-    setMats(prev => [...prev, {
-      id: `MAT${Date.now()}`, courseId: sel.id, ...matF,
-      date: new Date().toISOString().slice(0,10), content: "",
-    }]);
-    setMatF({ title:"", type:"Lecture", description:"" });
+    if (!matF.term) { showToast("Please select a term before adding this material."); return; }
+    const courseUuid  = sel._uuid;
+    const teacherUuid = user._uuid;
+    if (!courseUuid)  { showToast("Course UUID missing — reload the page."); return; }
+    if (!teacherUuid) { showToast("Teacher UUID missing — reload the page."); return; }
+
+    // Build payload without `term` by default — the column is added via ALTER TABLE
+    // in the SQL script, but ALTER runs before DROP TABLE, so it gets wiped on a
+    // fresh schema apply. Sending term:null when the column doesn't exist causes a
+    // PostgREST 400 "column not found in schema cache". Only include it when set.
+    const matPayload = {
+      course_id:       courseUuid,
+      created_by:      teacherUuid,
+      title:           matF.title.trim(),
+      material_type:   matF.type,
+      description:     matF.description?.trim() || null,
+      attachment_name: matF.attachmentName || null,
+      is_published:    true,
+    };
+    if (matF.term) matPayload.term = matF.term;   // only include when non-empty
+
+    const { data: newMat, error } = await supabase
+      .from("materials").insert(matPayload).select().single();
+
+    if (error) { showToast("Error saving material: " + error.message); return; }
+
+    // ── Upload staged attachment now that we have the real material UUID ────────
+    let attachmentUrl = null;
+    if (pendingFile instanceof File) {
+      const storagePath = `${courseUuid}/${newMat.material_id}/${Date.now()}_${safeFileName(pendingFile.name)}`;
+      try {
+        showToast("Uploading attachment…");
+        attachmentUrl = await uploadFileToStorage("materials", storagePath, pendingFile);
+        // Patch the row we just created with the storage URL
+        await supabase.from("materials")
+          .update({ attachment_url: attachmentUrl })
+          .eq("material_id", newMat.material_id);
+      } catch (uploadErr) {
+        showToast("Material saved but attachment upload failed: " + uploadErr.message);
+      }
+      setPendingFile(null);
+    }
+
+    // Normalize and add to local state using the real DB row
+    setMats(prev => [...prev, normalizeMaterial({
+      ...newMat,
+      attachment_url: attachmentUrl,
+      courses: { course_code: sel.id },
+    })]);
+    setMatF({ title:"", type:"Lecture", term:"", description:"" });
     showToast("Material added!");
   };
 
@@ -3477,9 +4439,21 @@ function TeacherCourses({ user, courses, allUsers }) {
   };
 
   // Called when teacher saves edits inside the detail view
-  const handleMaterialUpdate = (updated) => {
+  const handleMaterialUpdate = async (updated) => {
+    // Find the real material_id UUID — normalizeMaterial stores it as `id`
+    const { error } = await supabase.from("materials").update({
+      title:           updated.title,
+      description:     updated.description || null,
+      content:         updated.content     || null,
+      due_date:        updated.dueDate     || null,
+      total_points:    updated.points      || null,
+      attachment_name: updated.attachment_name || updated.attachmentName || null,
+      attachment_url:  updated.attachment_url || null,  // persist new storage URL
+    }).eq("material_id", updated.id);
+
+    if (error) { showToast("Error saving changes: " + error.message); return; }
+
     setMats(prev => prev.map(m => m.id === updated.id ? updated : m));
-    // If the currently selected material is the one being updated, refresh it
     if (selectedMaterial?.id === updated.id) setSelectedMaterial(updated);
   };
 
@@ -3500,7 +4474,7 @@ function TeacherCourses({ user, courses, allUsers }) {
     {field:"yearLevel", header:"Year",      width:90},
     {field:"semester",  header:"Semester",  width:110},
     {field:"id",        header:"Students",  width:75,
-      cellRenderer:(_,row)=><Badge color="info">{INIT_ENROLLMENTS.filter(e=>e.courseId===row.id).length}</Badge>},
+      cellRenderer:(_,row)=><Badge color="info">{enrollments.filter(e=>e.courseId===row.id).length}</Badge>},
   ];
 
   // ── DefaultCourseView ─────────────────────────────────────────────────────
@@ -3547,9 +4521,19 @@ function TeacherCourses({ user, courses, allUsers }) {
                   {/* Add material form */}
                   <div style={{ fontSize:10, fontWeight:800, color:"#64748b", textTransform:"uppercase", letterSpacing:"0.06em" }}>Add Material</div>
                   <Input value={matF.title} onChange={e=>setMatF(f=>({...f,title:e.target.value}))} placeholder="Material title" />
-                  <Sel value={matF.type} onChange={e=>setMatF(f=>({...f,type:e.target.value}))}>
-                    {["Lecture","Reading","Lab","Assignment"].map(t=><option key={t}>{t}</option>)}
-                  </Sel>
+                  <div style={{ display:"flex", gap:8 }}>
+                    <Sel value={matF.type} onChange={e=>setMatF(f=>({...f,type:e.target.value}))} style={{ flex:1 }}>
+                      {["Lecture","Reading","Lab","Assignment"].map(t=><option key={t}>{t}</option>)}
+                    </Sel>
+                    <div style={{ flex:1, position:"relative" }}>
+                      <Sel value={matF.term} onChange={e=>setMatF(f=>({...f,term:e.target.value}))}
+                        style={{ width:"100%", borderColor: matF.term ? "#e2e8f0" : "#ef4444", color: matF.term ? "inherit" : "#94a3b8" }}>
+                        <option value="" disabled>— Term (required) —</option>
+                        {EXAM_TERMS.map(t=><option key={t}>{t}</option>)}
+                      </Sel>
+                      {!matF.term && <span style={{ position:"absolute", top:-6, right:6, fontSize:10, fontWeight:800, color:"#ef4444", background:"#fff", padding:"0 3px" }}>required</span>}
+                    </div>
+                  </div>
                   <textarea value={matF.description} onChange={e=>setMatF(f=>({...f,description:e.target.value}))}
                     className="edit-textarea" rows={2} placeholder="Description (optional)" style={{ resize:"none" }} />
                   {/* File attach */}
@@ -3578,6 +4562,9 @@ function TeacherCourses({ user, courses, allUsers }) {
                                   <div style={{ fontWeight:700, fontSize:12, color:"#1e293b", marginBottom:2, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{m.title}</div>
                                   <div style={{ display:"flex", alignItems:"center", gap:5 }}>
                                     <TypeBadge type={m.type} />
+                                    {m.term && (
+                                      <span style={{ fontSize:9, background: TERM_META[m.term]?.bg || "#f1f5f9", color: TERM_META[m.term]?.color || "#64748b", padding:"1px 5px", borderRadius:9999, fontWeight:700 }}>{m.term}</span>
+                                    )}
                                     <span style={{ fontSize:10, color:"#94a3b8" }}>{m.date}</span>
                                     {isSubmittable(m.type) && (
                                       <span style={{ fontSize:9, background:"#ede9fe", color:"#6366f1", padding:"1px 5px", borderRadius:9999, fontWeight:700 }}>Gradable</span>
@@ -3651,10 +4638,63 @@ function TeacherCourses({ user, courses, allUsers }) {
         course={myCourses.find(c => c.id === sel?.id) || sel}
         initialExam={buildingExam}
         onBack={() => setBuildingExam(null)}
-        onSave={(savedExam) => {
-          setExams(prev => [...prev, { ...savedExam, totalPoints: savedExam.totalPoints }]);
+        onSave={async (savedExam) => {
+          const courseUuid  = sel?._uuid;
+          const teacherUuid = user._uuid;
+          if (!courseUuid || !teacherUuid) {
+            showToast("UUID missing — reload the page."); return;
+          }
+
+          // Parse duration string (e.g. "2 hours", "90 min") → integer minutes
+          const parseDuration = (s) => {
+            if (!s) return 60;
+            const h = s.match(/(\d+)\s*hour/i);
+            const m = s.match(/(\d+)\s*min/i);
+            return ((h ? parseInt(h[1]) : 0) * 60) + (m ? parseInt(m[1]) : 0) || 60;
+          };
+
+          // 1. Insert exam header row
+          // `term` is only included when set — same schema-cache guard as addMat.
+          const examPayload = {
+            course_id:        courseUuid,
+            created_by:       teacherUuid,
+            title:            savedExam.title,
+            exam_date:        savedExam.date,
+            duration_minutes: parseDuration(savedExam.duration),
+            total_points:     savedExam.totalPoints,
+            instant_feedback: true,
+            is_published:     true,
+          };
+          if (savedExam.term) examPayload.term = savedExam.term;
+
+          const { data: newExam, error: examErr } = await supabase
+            .from("exams").insert(examPayload).select().single();
+
+          if (examErr) { showToast("Error saving exam: " + examErr.message); return; }
+
+          // 2. Insert all questions linked to the new exam UUID
+          if (savedExam.questions.length > 0) {
+            const questionRows = savedExam.questions.map((q, i) => ({
+              exam_id:        newExam.exam_id,
+              question_type:  q.type,
+              question_text:  q.questionText,
+              options:        q.type === "MCQ" ? q.options : null,
+              correct_answer: q.correctAnswer,
+              points:         q.points,
+              sort_order:     i,
+            }));
+            const { error: qErr } = await supabase.from("exam_questions").insert(questionRows);
+            if (qErr) { showToast("Exam saved but questions failed: " + qErr.message); return; }
+          }
+
+          // 3. Update local state with real DB IDs
+          setExams(prev => [...prev, {
+            ...savedExam,
+            id:       newExam.exam_id,
+            courseId: sel.id,
+          }]);
           setBuildingExam(null);
-          showToast(`"${savedExam.title}" saved with ${savedExam.questions.length} question${savedExam.questions.length!==1?"s":""}!`);
+          showToast(`"${savedExam.title}" saved with ${savedExam.questions.length} question${savedExam.questions.length !== 1 ? "s" : ""}!`);
         }}
       />
     );
@@ -3665,128 +4705,334 @@ function TeacherCourses({ user, courses, allUsers }) {
         material={selectedMaterial}
         course={myCourses.find(c => c.id === selectedMaterial.courseId)}
         allUsers={allUsers}
+        user={user}
         onBack={() => setSelectedMaterial(null)}
         onUpdate={handleMaterialUpdate}
         gradeEntries={gradeEntries}
         onGradeUpdate={handleGradeUpdate}
+        enrollments={enrollments}
       />
     : DefaultCourseView;
 }
 
-// ── AG Grid Column Definitions — Teacher Master Grade Dashboard ───────────────
-// Columns: Student Name | Course | Avg Score | Exam Scores breakdown | Action
-// Cell styling: grade-cell-high (≥90 purple), grade-cell-pass (75–89 green),
-//               grade-cell-warn (60–74 amber),  grade-cell-fail (<60 red)
-// Drill-down: click "View" → per-exam detail modal
+// ── ClassStandingModal ────────────────────────────────────────────────────────
+// Teacher inputs Project / Recitation / Attendance (each /100) per term for
+// one student × course combination. Shows auto-computed CS% per term.
+function ClassStandingModal({ student, course, existing, teacherUuid, onSave, onClose }) {
+  const initVals = () => {
+    const s = {};
+    EXAM_TERMS.forEach(t => {
+      const e = existing.find(x => x.term === t);
+      s[t] = { project: e?.project ?? "", recitation: e?.recitation ?? "", attendance: e?.attendance ?? "" };
+    });
+    return s;
+  };
+  const [vals,   setVals]   = useState(initVals);
+  const [saving, setSaving] = useState(false);
+  const [err,    setErr]    = useState("");
 
-function TeacherGrades({ user, courses, allUsers, examSubmissions }) {
-  const myCourses = courses.filter(c => c.teacher===user.id);
-
-  // Inline editable enrollment grades (course-wide)
-  const [grades,   setGrades]   = useState(INIT_ENROLLMENTS);
-  const [filterCourse, setFilterCourse] = useState("all");
-  const [filterStatus, setFilterStatus] = useState("all");
-  const [detailStudent, setDetailStudent] = useState(null);
-  const [toast, setToast] = useState("");
-  const showToast = (m) => { setToast(m); setTimeout(()=>setToast(""),2500); };
-
-  const cellGradeClass = (v) => v==null?"" : v>=90?"grade-cell-high":v>=75?"grade-cell-pass":v>=60?"grade-cell-warn":"grade-cell-fail";
-
-  // Build master rows: one row per (student × course) enrollment
-  const masterRows = grades
-    .filter(e => myCourses.some(c=>c.id===e.courseId))
-    .filter(e => filterCourse==="all" || e.courseId===filterCourse)
-    .map(e => {
-      const student   = allUsers.find(u=>u.id===e.studentId) || {};
-      const course    = myCourses.find(c=>c.id===e.courseId) || {};
-      const courseExams = INIT_EXAMS.filter(ex=>ex.courseId===e.courseId);
-      const mySubs = examSubmissions.filter(s=>s.studentId===e.studentId && s.courseId===e.courseId);
-      const examScores = courseExams.map(ex=>{
-        const sub = mySubs.find(s=>s.examId===ex.id);
-        return { title:ex.title, score:sub?sub.score:null, total:ex.totalPoints,
-          pct: sub ? Math.round((sub.score/sub.totalPoints)*100) : null };
-      });
-      const takenScores = examScores.filter(x=>x.pct!=null).map(x=>x.pct);
-      const avgScore = takenScores.length > 0
-        ? Math.round(takenScores.reduce((a,b)=>a+b,0)/takenScores.length)
-        : e.grade;
-      return {
-        studentId: e.studentId, courseId: e.courseId,
-        studentName: student.fullName||e.studentId,
-        courseCode: course.code||e.courseId, courseName: course.name||"",
-        grade: e.grade, avgScore, examScores,
-        examsTaken: takenScores.length, totalExams: courseExams.length,
-        status: avgScore>=75?"Pass":avgScore!=null?"Fail":"Pending",
-      };
-    })
-    .filter(r => filterStatus==="all" || r.status===filterStatus);
-
-  // Stats
-  const totalStudents = [...new Set(masterRows.map(r=>r.studentId))].length;
-  const passCount = masterRows.filter(r=>r.status==="Pass").length;
-  const failCount = masterRows.filter(r=>r.status==="Fail").length;
-  const validScores = masterRows.filter(r=>r.avgScore!=null).map(r=>r.avgScore);
-  const classAvg = validScores.length ? (validScores.reduce((a,b)=>a+b,0)/validScores.length).toFixed(1) : "—";
-
-  const updateGrade = (studentId, courseId, val) => {
-    const n = Math.max(0, Math.min(100, Number(val)));
-    setGrades(prev => prev.map(e => e.studentId===studentId && e.courseId===courseId ? {...e,grade:n} : e));
+  const upd = (term, field, raw) => {
+    const v = raw === "" ? "" : Math.max(0, Math.min(100, Number(raw)));
+    setVals(p => ({ ...p, [term]: { ...p[term], [field]: v } }));
   };
 
-  // AG Grid Column Definitions
-  const cols = [
-    { field:"studentName", header:"Student Name", width:160,
-      cellRenderer: (v,row) => (
-        <div style={{ display:"flex", alignItems:"center", gap:8 }}>
-          <div style={{ width:26, height:26, borderRadius:"50%", background:"#ede9fe", color:"#6366f1", fontSize:10, fontWeight:900, display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0 }}>
-            {v?.charAt(0)}
+  const csFor = (term) => {
+    const v   = vals[term];
+    const arr = [v.project, v.recitation, v.attendance].filter(x => x !== "");
+    return arr.length ? Math.round(arr.reduce((a, b) => a + Number(b), 0) / arr.length) : null;
+  };
+
+  const handleSave = async () => {
+    setSaving(true); setErr("");
+    const rows = EXAM_TERMS
+      .map(term => {
+        const v = vals[term];
+        return {
+          student_id:  student._uuid,
+          course_id:   course._uuid,
+          term,
+          project:    v.project    !== "" ? Number(v.project)    : null,
+          recitation: v.recitation !== "" ? Number(v.recitation) : null,
+          attendance: v.attendance !== "" ? Number(v.attendance) : null,
+          updated_by: teacherUuid,
+          updated_at: new Date().toISOString(),
+        };
+      })
+      .filter(r => r.project != null || r.recitation != null || r.attendance != null);
+
+    if (!rows.length) { setSaving(false); onClose(); return; }
+
+    const { error } = await supabase
+      .from("class_standing")
+      .upsert(rows, { onConflict: "student_id,course_id,term" });
+
+    setSaving(false);
+    if (error) { setErr("Error: " + error.message); return; }
+
+    onSave(rows.map(r => ({
+      studentUuid: r.student_id, courseUuid: r.course_id, term: r.term,
+      project: r.project, recitation: r.recitation, attendance: r.attendance,
+    })));
+    onClose();
+  };
+
+  return (
+    <div className="modal-overlay" onClick={e => e.target === e.currentTarget && onClose()}>
+      <div className="modal-box" style={{ background:"#fff", borderRadius:14, width:660, maxHeight:"90vh", display:"flex", flexDirection:"column", overflow:"hidden", boxShadow:"0 24px 80px rgba(0,0,0,.25)" }}>
+        {/* Header */}
+        <div style={{ padding:"16px 20px", borderBottom:"1px solid #e2e8f0", background:"#fafafa", display:"flex", alignItems:"center", justifyContent:"space-between", flexShrink:0 }}>
+          <div>
+            <div style={{ fontWeight:900, fontSize:15, color:"#0f172a" }}>🏆 Class Standing Grades</div>
+            <div style={{ fontSize:12, color:"#64748b", marginTop:2 }}>
+              {student.fullName} <span style={{ color:"#94a3b8" }}>·</span> {course.code}: {course.name}
+            </div>
           </div>
+          <button onClick={onClose} style={{ border:"none", background:"none", cursor:"pointer", color:"#94a3b8", fontSize:22, lineHeight:1 }}
+            onMouseEnter={e => e.currentTarget.style.color="#ef4444"}
+            onMouseLeave={e => e.currentTarget.style.color="#94a3b8"}>×</button>
+        </div>
+
+        <div style={{ flex:1, overflowY:"auto", padding:"18px 20px" }}>
+          {/* Formula chip */}
+          <div style={{ background:"#f0fdf4", border:"1px solid #bbf7d0", borderRadius:8, padding:"10px 14px", marginBottom:16, fontSize:12 }}>
+            <span style={{ fontWeight:800, color:"#065f46" }}>Grade Formula: </span>
+            <span style={{ color:"#166534" }}>Course Work <strong>30%</strong> + Class Standing <strong>30%</strong> + Exams <strong>40%</strong></span>
+            <div style={{ fontSize:11, color:"#16a34a", marginTop:3 }}>
+              Class Standing % = average(Project + Recitation + Attendance) — each scored out of 100
+            </div>
+          </div>
+
+          {/* Input grid */}
+          <table style={{ width:"100%", borderCollapse:"collapse", fontSize:13 }}>
+            <thead>
+              <tr style={{ background:"#1e293b" }}>
+                {["Term","Project /100","Recitation /100","Attendance /100","CS Grade"].map(h => (
+                  <th key={h} style={{ padding:"9px 12px", textAlign:"left", fontSize:10, fontWeight:700, color:"#94a3b8", textTransform:"uppercase", letterSpacing:"0.06em" }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {EXAM_TERMS.map((term, i) => {
+                const cs = csFor(term);
+                const tm = TERM_META[term];
+                return (
+                  <tr key={term} style={{ borderBottom:"1px solid #f1f5f9", background:i%2===0?"#fff":"#f8fafc" }}>
+                    <td style={{ padding:"10px 12px" }}>
+                      <span style={{ fontSize:11, fontWeight:800, color:tm.color, background:tm.bg, padding:"3px 10px", borderRadius:9999 }}>{term}</span>
+                    </td>
+                    {["project","recitation","attendance"].map(field => (
+                      <td key={field} style={{ padding:"8px 12px" }}>
+                        <input type="number" min={0} max={100}
+                          value={vals[term][field]}
+                          onChange={e => upd(term, field, e.target.value)}
+                          placeholder="—"
+                          style={{ width:76, border:"1.5px solid #e2e8f0", borderRadius:6, padding:"6px 8px", fontSize:13, fontFamily:"inherit", textAlign:"center", outline:"none" }}
+                          onFocus={e  => e.target.style.borderColor="#6366f1"}
+                          onBlur={e   => e.target.style.borderColor="#e2e8f0"}
+                        />
+                      </td>
+                    ))}
+                    <td style={{ padding:"10px 12px" }}>
+                      {cs != null
+                        ? <span style={{ fontWeight:900, fontSize:15, color:gradeColor(cs) }}>{cs}%</span>
+                        : <span style={{ color:"#94a3b8", fontSize:12 }}>—</span>}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+
+        <div style={{ padding:"14px 20px", borderTop:"1px solid #e2e8f0", background:"#fafafa", display:"flex", alignItems:"center", justifyContent:"space-between", flexShrink:0 }}>
+          {err ? <span style={{ fontSize:11, color:"#dc2626", fontWeight:700 }}>{err}</span> : <span />}
+          <div style={{ display:"flex", gap:10 }}>
+            <Btn variant="secondary" onClick={onClose}>Cancel</Btn>
+            <Btn onClick={handleSave} disabled={saving}>{saving ? "Saving…" : "💾 Save Class Standing"}</Btn>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── TeacherGrades ─────────────────────────────────────────────────────────────
+// Master grade dashboard: per-student × course rows with per-term computed grades.
+// Formula: Course Work 30% + Class Standing 30% + Exams 40%.
+// "Set CS" opens ClassStandingModal; "View" opens per-term detail modal.
+function TeacherGrades({ user, courses, allUsers, examSubmissions, enrollments }) {
+  const myCourses = courses.filter(c => c.teacher === user.id);
+
+  const [allExams,       setAllExams]       = useState([]);
+  const [allMaterials,   setAllMaterials]   = useState([]);
+  const [classStandings, setClassStandings] = useState([]);
+  const [allWorkSubs,    setAllWorkSubs]    = useState([]);
+  const [filterCourse,   setFilterCourse]   = useState("all");
+  const [filterStatus,   setFilterStatus]   = useState("all");
+  const [csModal,        setCsModal]        = useState(null);  // { student, course }
+  const [detailRow,      setDetailRow]      = useState(null);
+  const [toast,          setToast]          = useState("");
+  const showToast = (m) => { setToast(m); setTimeout(() => setToast(""), 2500); };
+
+  useEffect(() => {
+    async function loadData() {
+      const uuidToCode = {};
+      courses.forEach(c => { if (c._uuid) uuidToCode[c._uuid] = c.id; });
+      const courseUuids = myCourses.map(c => c._uuid).filter(Boolean);
+      if (!courseUuids.length) return;
+
+      const [examRes, qRes, matRes, csRes] = await Promise.all([
+        supabase.from("exams").select("*").in("course_id", courseUuids),
+        supabase.from("exam_questions").select("*"),
+        supabase.from("materials")
+          .select("material_id,course_id,material_type,term,total_points,title")
+          .in("course_id", courseUuids),
+        supabase.from("class_standing").select("*").in("course_id", courseUuids),
+      ]);
+
+      if (examRes.data) setAllExams(examRes.data.map(r => normalizeExam({
+        ...r,
+        courses:        { course_code: uuidToCode[r.course_id] || r.course_id },
+        exam_questions: (qRes.data || []).filter(q => q.exam_id === r.exam_id),
+      })));
+
+      const matIds = (matRes.data || []).map(m => m.material_id);
+      let wsCombined = [];
+      if (matIds.length) {
+        const { data: wsData } = await supabase
+          .from("work_submissions")
+          .select("material_id,student_id,score,status")
+          .in("material_id", matIds)
+          .eq("status", "Graded");
+        wsCombined = wsData || [];
+      }
+
+      setAllMaterials(matRes.data || []);
+      setAllWorkSubs(wsCombined);
+      setClassStandings((csRes.data || []).map(r => ({
+        studentUuid: r.student_id, courseUuid: r.course_id, term: r.term,
+        project: r.project, recitation: r.recitation, attendance: r.attendance,
+      })));
+    }
+    loadData();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [courses]);
+
+  const getTermData = (studentDisplayId, studentUuid, courseId, courseUuid) => {
+    const result = {};
+    EXAM_TERMS.forEach(term => {
+      // Course Work
+      const cwMats = allMaterials.filter(m =>
+        m.course_id === courseUuid && m.term === term &&
+        (m.material_type === "Lab" || m.material_type === "Assignment")
+      );
+      const cwSubs = cwMats.map(m => {
+        const ws = allWorkSubs.find(w => w.material_id === m.material_id && w.student_id === studentUuid);
+        return ws ? ws.score : null;
+      }).filter(x => x != null);
+      const cw = cwSubs.length > 0 ? Math.round(cwSubs.reduce((a,b) => a+b, 0) / cwSubs.length) : null;
+
+      // Class Standing
+      const csEntry = classStandings.find(cs =>
+        cs.studentUuid === studentUuid && cs.courseUuid === courseUuid && cs.term === term
+      ) || null;
+      const cs = csGradePct(csEntry);
+
+      // Exams
+      const termExams = allExams.filter(ex => ex.courseId === courseId && ex.term === term);
+      const subs = examSubmissions.filter(s => s.studentId === studentDisplayId && s.courseId === courseId);
+      const examPcts = termExams.map(ex => {
+        const sub = subs.find(s => s.examId === ex.id);
+        return sub ? Math.round((sub.score / sub.totalPoints) * 100) : null;
+      }).filter(x => x != null);
+      const exam = examPcts.length > 0 ? Math.round(examPcts.reduce((a,b) => a+b,0) / examPcts.length) : null;
+
+      result[term] = { cw, cs, csEntry, exam, grade: computeTermGrade({ cw, cs, exam }) };
+    });
+    return result;
+  };
+
+  const cellGradeClass = (v) => v == null ? "" : v >= 90 ? "grade-cell-high" : v >= 75 ? "grade-cell-pass" : v >= 60 ? "grade-cell-warn" : "grade-cell-fail";
+
+  // Master rows
+  const masterRows = enrollments
+    .filter(e => myCourses.some(c => c.id === e.courseId))
+    .filter(e => filterCourse === "all" || e.courseId === filterCourse)
+    .map(e => {
+      const student = allUsers.find(u => u.id === e.studentId) || {};
+      const course  = myCourses.find(c => c.id === e.courseId) || {};
+      const termData = getTermData(e.studentId, student._uuid, e.courseId, course._uuid);
+      const termGrades = EXAM_TERMS.map(t => termData[t].grade).filter(x => x != null);
+      const overall = termGrades.length > 0 ? Math.round(termGrades.reduce((a,b) => a+b,0) / termGrades.length) : null;
+      return {
+        studentId: e.studentId, courseId: e.courseId,
+        studentUuid: student._uuid, courseUuid: course._uuid,
+        studentName: student.fullName || e.studentId,
+        courseCode: course.code || e.courseId, courseName: course.name || "",
+        termData, overall,
+        status: overall == null ? "Pending" : overall >= 75 ? "Pass" : "Fail",
+        _student: student, _course: course,
+      };
+    })
+    .filter(r => filterStatus === "all" || r.status === filterStatus);
+
+  const totalStudents = [...new Set(masterRows.map(r => r.studentId))].length;
+  const passCount = masterRows.filter(r => r.status === "Pass").length;
+  const failCount = masterRows.filter(r => r.status === "Fail").length;
+  const validOveralls = masterRows.filter(r => r.overall != null).map(r => r.overall);
+  const classAvg = validOveralls.length
+    ? (validOveralls.reduce((a,b) => a+b,0) / validOveralls.length).toFixed(1) : "—";
+
+  const termGradeCell = (row, term) => {
+    const g = row.termData[term]?.grade;
+    return g != null
+      ? <span className={cellGradeClass(g)} style={{ display:"block", textAlign:"center", fontWeight:800, padding:"2px 6px", borderRadius:5, fontSize:12 }}>{g}%</span>
+      : <span style={{ color:"#94a3b8", fontSize:11 }}>—</span>;
+  };
+
+  const cols = [
+    { field:"studentName", header:"Student", width:160,
+      cellRenderer:(v,row)=>(
+        <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+          <div style={{ width:26, height:26, borderRadius:"50%", background:"#ede9fe", color:"#6366f1", fontSize:10, fontWeight:900, display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0 }}>{v?.charAt(0)}</div>
           <div>
             <div style={{ fontWeight:700, fontSize:12, color:"#1e293b" }}>{v}</div>
             <div style={{ fontSize:10, color:"#94a3b8" }}>{row.studentId}</div>
           </div>
         </div>
       )},
-    { field:"courseCode", header:"Course", width:80,
-      cellRenderer:(v,row)=><span style={{fontWeight:700,color:"#4f46e5"}}>{v}</span> },
-    { field:"examsTaken", header:"Exams", width:80,
-      cellRenderer:(v,row)=><span style={{fontSize:12,color:"#64748b"}}>{v}/{row.totalExams}</span> },
-    { field:"avgScore", header:"Avg Score", width:100,
-      cellRenderer: (v) => v!=null
-        ? <span className={cellGradeClass(v)} style={{display:"block",textAlign:"center",fontWeight:900,fontSize:14,padding:"2px 8px",borderRadius:6}}>{v}%</span>
-        : <span style={{color:"#94a3b8",fontSize:11}}>Pending</span> },
-    { field:"grade", header:"Grade (Edit)", width:120,
-      cellRenderer:(v,row)=>(
-        <input type="number" defaultValue={v??""} min={0} max={100}
-          onChange={e=>updateGrade(row.studentId,row.courseId,e.target.value)}
-          style={{ width:60, border:"1px solid #e2e8f0", borderRadius:5, padding:"4px 6px", fontSize:13, fontFamily:"inherit", textAlign:"center", outline:"none" }}
-          onFocus={e=>e.target.style.borderColor="#6366f1"}
-          onBlur={e=>e.target.style.borderColor="#e2e8f0"}
-        />
-      )},
-    { field:"status", header:"Status", width:90,
+    { field:"courseCode", header:"Course", width:75,
+      cellRenderer:(v)=><span style={{ fontWeight:700, color:"#4f46e5" }}>{v}</span> },
+    { field:"_prelim",     header:"Prelim",     width:82, cellRenderer:(_,row)=>termGradeCell(row,"Prelim") },
+    { field:"_midterm",    header:"Midterm",    width:82, cellRenderer:(_,row)=>termGradeCell(row,"Midterm") },
+    { field:"_semifinal",  header:"Semi-Final", width:90, cellRenderer:(_,row)=>termGradeCell(row,"Semi-Final") },
+    { field:"_finals",     header:"Finals",     width:82, cellRenderer:(_,row)=>termGradeCell(row,"Finals") },
+    { field:"overall", header:"Overall", width:88,
+      cellRenderer:(v)=>v!=null
+        ? <span className={cellGradeClass(v)} style={{ display:"block", textAlign:"center", fontWeight:900, fontSize:14, padding:"2px 6px", borderRadius:5 }}>{v}%</span>
+        : <span style={{ color:"#94a3b8", fontSize:11 }}>—</span> },
+    { field:"status", header:"Status", width:80,
       cellRenderer:(v)=><Badge color={v==="Pass"?"success":v==="Fail"?"danger":"default"}>{v}</Badge> },
-    { field:"studentId", header:"Performance", sortable:false,
+    { field:"studentId", header:"Actions", width:150, sortable:false,
       cellRenderer:(_,row)=>(
-        <div style={{ display:"flex", alignItems:"center", gap:7 }}>
-          <div style={{ flex:1, height:6, background:"#f1f5f9", borderRadius:3, overflow:"hidden", minWidth:60 }}>
-            <div style={{ width:`${row.avgScore||0}%`, height:"100%", background:gradeColor(row.avgScore||0), borderRadius:3 }}/>
-          </div>
-          <span style={{ fontSize:10, color:"#64748b", minWidth:30 }}>{row.avgScore??0}%</span>
+        <div style={{ display:"flex", gap:6 }}>
+          <Btn size="sm" variant="secondary"
+            onClick={e=>{e.stopPropagation();setCsModal({student:row._student,course:row._course});}}
+            style={{ fontSize:11, padding:"3px 9px" }}>
+            🏆 Set CS
+          </Btn>
+          <Btn size="sm" variant="ghost" style={{ border:"1px solid #e2e8f0", fontSize:11, padding:"3px 9px" }}
+            onClick={e=>{e.stopPropagation();setDetailRow(row);}}>
+            View →
+          </Btn>
         </div>
-      )},
-    { field:"studentId", header:"Action", width:80, sortable:false,
-      cellRenderer:(_,row)=>(
-        <Btn size="sm" variant="ghost" style={{border:"1px solid #e2e8f0"}}
-          onClick={()=>setDetailStudent(row)}>
-          View →
-        </Btn>
       )},
   ];
 
   return (
     <div style={{ display:"flex", flexDirection:"column", height:"100%" }}>
-      <TopBar title="Grade Students" subtitle="Master dashboard — all enrolled students across your courses"
+      <TopBar title="Grade Students"
+        subtitle="Formula: Course Work 30% + Class Standing 30% + Exams 40%"
         actions={
           <div style={{ display:"flex", gap:8, alignItems:"center" }}>
             {toast && <span style={{ fontSize:12, color:"#065f46", fontWeight:700, background:"#d1fae5", padding:"4px 10px", borderRadius:6 }}>✓ {toast}</span>}
@@ -3800,94 +5046,148 @@ function TeacherGrades({ user, courses, allUsers, examSubmissions }) {
               <option value="Fail">Fail</option>
               <option value="Pending">Pending</option>
             </Sel>
-            <Btn onClick={()=>showToast("All grades saved!")}>💾 Save All</Btn>
           </div>
         }
       />
       <div style={{ flex:1, padding:"14px 20px", display:"flex", flexDirection:"column", overflow:"hidden", gap:12 }}>
         {/* Stat cards */}
         <div style={{ display:"grid", gridTemplateColumns:"repeat(5,1fr)", gap:10, flexShrink:0 }}>
-          <StatCard icon="👥" label="Students"    value={totalStudents}      color="#6366f1" bg="#ede9fe" />
-          <StatCard icon="📊" label="Class Avg"   value={classAvg+(classAvg!=="—"?"%":"")} color="#10b981" bg="#d1fae5" />
-          <StatCard icon="✅" label="Passing"      value={passCount}          color="#3b82f6" bg="#dbeafe" />
-          <StatCard icon="❌" label="Failing"      value={failCount}          color="#ef4444" bg="#fee2e2" />
-          <StatCard icon="📝" label="Submissions" value={examSubmissions.filter(s=>myCourses.some(c=>c.id===s.courseId)).length} color="#f59e0b" bg="#fef3c7" />
+          <StatCard icon="👥" label="Students"   value={totalStudents}                       color="#6366f1" bg="#ede9fe" />
+          <StatCard icon="📊" label="Class Avg"  value={classAvg+(classAvg!=="—"?"%":"")}   color="#10b981" bg="#d1fae5" />
+          <StatCard icon="✅" label="Passing"    value={passCount}                            color="#3b82f6" bg="#dbeafe" />
+          <StatCard icon="❌" label="Failing"    value={failCount}                            color="#ef4444" bg="#fee2e2" />
+          <StatCard icon="📝" label="Exams"      value={examSubmissions.filter(s=>myCourses.some(c=>c.id===s.courseId)).length} color="#f59e0b" bg="#fef3c7" />
         </div>
 
-        {/* AG Grid */}
+        {/* Legend */}
+        <div style={{ display:"flex", gap:16, padding:"6px 10px", background:"#fff", borderRadius:7, border:"1px solid #e2e8f0", flexShrink:0, alignItems:"center" }}>
+          <span style={{ fontSize:10, fontWeight:800, color:"#64748b", textTransform:"uppercase", letterSpacing:"0.06em" }}>Formula</span>
+          {[["📚 Course Work","30%","#ede9fe","#6366f1"],["🏆 Class Standing","30%","#d1fae5","#10b981"],["📝 Exams","40%","#fef3c7","#f59e0b"]].map(([lbl,pct,bg,col])=>(
+            <div key={lbl} style={{ display:"flex", alignItems:"center", gap:5, fontSize:11 }}>
+              <span style={{ background:bg, color:col, fontWeight:800, padding:"2px 8px", borderRadius:9999 }}>{pct}</span>
+              <span style={{ color:"#64748b" }}>{lbl}</span>
+            </div>
+          ))}
+          <span style={{ fontSize:11, color:"#94a3b8", marginLeft:"auto" }}>Click "🏆 Set CS" to enter Project / Recitation / Attendance grades</span>
+        </div>
+
+        {/* Grid */}
         <div style={{ flex:1, overflow:"hidden" }}>
           <LMSGrid columns={cols} rowData={masterRows} height="100%"
-            onRowClick={row=>setDetailStudent(row)} selectedId={detailStudent?.studentId+detailStudent?.courseId} />
+            onRowClick={row => setDetailRow(row)}
+            selectedId={detailRow?.studentId + detailRow?.courseId} />
         </div>
       </div>
 
-      {/* Student detail modal */}
-      {detailStudent && (
-        <div className="modal-overlay" onClick={e=>e.target===e.currentTarget&&setDetailStudent(null)}>
-          <div className="modal-box" style={{ background:"#fff", borderRadius:14, width:560, maxHeight:"85vh", display:"flex", flexDirection:"column", overflow:"hidden", boxShadow:"0 24px 80px rgba(0,0,0,.25)" }}>
-            <div style={{ padding:"16px 20px", borderBottom:"1px solid #e2e8f0", display:"flex", alignItems:"center", justifyContent:"space-between", background:"#fafafa" }}>
+      {/* ── Class Standing Modal ── */}
+      {csModal && (
+        <ClassStandingModal
+          student={csModal.student}
+          course={csModal.course}
+          existing={classStandings.filter(cs =>
+            cs.studentUuid === csModal.student._uuid && cs.courseUuid === csModal.course._uuid
+          )}
+          teacherUuid={user._uuid}
+          onSave={(newRows) => {
+            setClassStandings(prev => {
+              const filtered = prev.filter(cs =>
+                !(cs.studentUuid === csModal.student._uuid && cs.courseUuid === csModal.course._uuid &&
+                  newRows.some(r => r.term === cs.term))
+              );
+              return [...filtered, ...newRows];
+            });
+            showToast(`Class Standing saved for ${csModal.student.fullName}`);
+          }}
+          onClose={() => setCsModal(null)}
+        />
+      )}
+
+      {/* ── Student Detail Modal ── */}
+      {detailRow && (
+        <div className="modal-overlay" onClick={e => e.target === e.currentTarget && setDetailRow(null)}>
+          <div className="modal-box" style={{ background:"#fff", borderRadius:14, width:680, maxHeight:"88vh", display:"flex", flexDirection:"column", overflow:"hidden", boxShadow:"0 24px 80px rgba(0,0,0,.25)" }}>
+            <div style={{ padding:"16px 20px", borderBottom:"1px solid #e2e8f0", background:"#fafafa", display:"flex", justifyContent:"space-between", alignItems:"flex-start", flexShrink:0 }}>
               <div>
-                <div style={{ fontWeight:900, fontSize:15, color:"#0f172a" }}>{detailStudent.studentName}</div>
-                <div style={{ fontSize:12, color:"#64748b", marginTop:2 }}>{detailStudent.courseCode} · {detailStudent.courseName}</div>
+                <div style={{ fontWeight:900, fontSize:15, color:"#0f172a" }}>{detailRow.studentName}</div>
+                <div style={{ fontSize:12, color:"#64748b", marginTop:2 }}>{detailRow.courseCode} · {detailRow.courseName}</div>
               </div>
-              <button onClick={()=>setDetailStudent(null)} style={{ border:"none", background:"none", cursor:"pointer", color:"#94a3b8", fontSize:22 }}
+              <button onClick={()=>setDetailRow(null)} style={{ border:"none", background:"none", cursor:"pointer", color:"#94a3b8", fontSize:22 }}
                 onMouseEnter={e=>e.currentTarget.style.color="#ef4444"}
                 onMouseLeave={e=>e.currentTarget.style.color="#94a3b8"}>×</button>
             </div>
+
             <div style={{ flex:1, overflowY:"auto", padding:"16px 20px" }}>
-              {/* Score summary */}
-              <div style={{ display:"flex", gap:12, marginBottom:16 }}>
-                <div style={{ flex:1, background:detailStudent.status==="Pass"?"#f0fdf4":"#fef2f2", border:`1px solid ${detailStudent.status==="Pass"?"#bbf7d0":"#fecaca"}`, borderRadius:10, padding:"12px 16px", textAlign:"center" }}>
-                  <div style={{ fontSize:28, fontWeight:900, color:detailStudent.status==="Pass"?"#065f46":"#dc2626" }}>{detailStudent.avgScore??detailStudent.grade??"-"}%</div>
-                  <div style={{ fontSize:11, color:"#64748b", marginTop:3 }}>Average Score</div>
-                  <Badge color={detailStudent.status==="Pass"?"success":detailStudent.status==="Fail"?"danger":"default"} style={{marginTop:6,display:"inline-block"}}>{detailStudent.status}</Badge>
+              {/* Overall grade summary */}
+              <div style={{ display:"flex", gap:10, marginBottom:18 }}>
+                <div style={{ flex:1, background:detailRow.status==="Pass"?"#f0fdf4":"#fef2f2", border:`1px solid ${detailRow.status==="Pass"?"#bbf7d0":"#fecaca"}`, borderRadius:10, padding:"14px", textAlign:"center" }}>
+                  <div style={{ fontSize:32, fontWeight:900, color:detailRow.status==="Pass"?"#065f46":"#dc2626" }}>{detailRow.overall ?? "—"}{detailRow.overall!=null?"%":""}</div>
+                  <div style={{ fontSize:11, color:"#64748b", marginTop:3 }}>Overall Grade</div>
+                  <Badge color={detailRow.status==="Pass"?"success":detailRow.status==="Fail"?"danger":"default"} style={{marginTop:6,display:"inline-block"}}>{detailRow.status}</Badge>
                 </div>
-                <div style={{ flex:2 }}>
-                  {/* Performance bar */}
-                  <div style={{ marginBottom:8 }}>
-                    <div style={{ display:"flex", justifyContent:"space-between", fontSize:11, color:"#64748b", marginBottom:4 }}>
-                      <span>Performance</span><span>{detailStudent.avgScore??detailStudent.grade??0}%</span>
-                    </div>
-                    <div className="result-bar-wrap">
-                      <div className="result-bar" style={{ width:`${detailStudent.avgScore||detailStudent.grade||0}%`, background:gradeColor(detailStudent.avgScore||detailStudent.grade||0) }}/>
-                    </div>
-                  </div>
-                  <div style={{ fontSize:11, color:"#64748b" }}>Exams taken: <strong>{detailStudent.examsTaken}/{detailStudent.totalExams}</strong></div>
-                  <div style={{ fontSize:11, color:"#64748b", marginTop:3 }}>Letter grade: <strong style={{color:gradeColor(detailStudent.avgScore||detailStudent.grade||0)}}>{detailStudent.avgScore!=null?letterGrade(detailStudent.avgScore):detailStudent.grade!=null?letterGrade(detailStudent.grade):"—"}</strong></div>
+                {/* Per-term overall pills */}
+                <div style={{ flex:3, display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:8 }}>
+                  {EXAM_TERMS.map(term => {
+                    const g  = detailRow.termData[term]?.grade;
+                    const tm = TERM_META[term];
+                    return (
+                      <div key={term} style={{ background:"#f8fafc", border:"1px solid #e2e8f0", borderRadius:8, padding:"10px 8px", textAlign:"center" }}>
+                        <div style={{ fontSize:9, fontWeight:800, color:tm.color, background:tm.bg, padding:"2px 7px", borderRadius:9999, display:"inline-block", marginBottom:6 }}>{term}</div>
+                        <div style={{ fontSize:20, fontWeight:900, color:g!=null?gradeColor(g):"#94a3b8" }}>{g!=null?`${g}%`:"—"}</div>
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
-              {/* Exam breakdown table */}
-              <div style={{ fontSize:10, fontWeight:800, color:"#64748b", textTransform:"uppercase", letterSpacing:"0.07em", marginBottom:8 }}>Exam Scores</div>
-              {detailStudent.examScores?.length===0
-                ? <div style={{fontSize:12,color:"#94a3b8",textAlign:"center",padding:"16px"}}>No exams for this course.</div>
-                : (
-                  <table style={{ width:"100%", borderCollapse:"collapse", fontSize:12 }}>
-                    <thead>
-                      <tr style={{background:"#1e293b"}}>
-                        {["Exam","Score","/ Total","Pct","Grade"].map(h=><th key={h} style={{padding:"6px 11px",textAlign:"left",fontSize:9,fontWeight:700,color:"#94a3b8",textTransform:"uppercase",letterSpacing:".06em"}}>{h}</th>)}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {detailStudent.examScores.map((ex,i)=>(
-                        <tr key={i} style={{borderBottom:"1px solid #f1f5f9"}}>
-                          <td style={{padding:"7px 11px",fontWeight:700,color:"#1e293b"}}>{ex.title}</td>
-                          <td style={{padding:"7px 11px"}}>{ex.score!=null?<strong style={{color:gradeColor(ex.pct)}}>{ex.score}</strong>:<span style={{color:"#94a3b8"}}>—</span>}</td>
-                          <td style={{padding:"7px 11px",color:"#64748b"}}>{ex.total}</td>
-                          <td style={{padding:"7px 11px"}}>
-                            {ex.pct!=null?<span className={cellGradeClass(ex.pct)} style={{padding:"1px 6px",borderRadius:4,display:"inline-block"}}>{ex.pct}%</span>:<span style={{color:"#94a3b8"}}>—</span>}
-                          </td>
-                          <td style={{padding:"7px 11px"}}>
-                            {ex.pct!=null?<Badge color={ex.pct>=80?"success":ex.pct>=70?"warning":"danger"}>{letterGrade(ex.pct)}</Badge>:<Badge>—</Badge>}
-                          </td>
-                        </tr>
+
+              {/* Per-term component breakdown */}
+              {EXAM_TERMS.map(term => {
+                const td = detailRow.termData[term];
+                const tm = TERM_META[term];
+                return (
+                  <div key={term} style={{ marginBottom:14, border:"1px solid #e2e8f0", borderRadius:9, overflow:"hidden" }}>
+                    <div style={{ background:"#f8fafc", padding:"8px 14px", display:"flex", alignItems:"center", justifyContent:"space-between", borderBottom:"1px solid #e2e8f0" }}>
+                      <span style={{ fontSize:11, fontWeight:800, color:tm.color, background:tm.bg, padding:"2px 9px", borderRadius:9999 }}>{term}</span>
+                      {td.grade != null
+                        ? <span className={cellGradeClass(td.grade)} style={{ fontWeight:900, padding:"3px 10px", borderRadius:6 }}>{td.grade}%</span>
+                        : <span style={{ fontSize:11, color:"#94a3b8" }}>Pending</span>}
+                    </div>
+                    <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:0 }}>
+                      {[
+                        { label:"📚 Course Work", pct:td.cw,   weight:"30%", color:"#6366f1", bg:"#ede9fe" },
+                        { label:"🏆 Class Standing", pct:td.cs, weight:"30%", color:"#10b981", bg:"#d1fae5" },
+                        { label:"📝 Exams",        pct:td.exam, weight:"40%", color:"#f59e0b", bg:"#fef3c7" },
+                      ].map(({ label, pct, weight, color, bg }, ci) => (
+                        <div key={label} style={{ padding:"10px 14px", borderRight:ci<2?"1px solid #f1f5f9":"none" }}>
+                          <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:6 }}>
+                            <span style={{ fontSize:10, fontWeight:700, color:"#64748b" }}>{label}</span>
+                            <span style={{ fontSize:9, fontWeight:700, color, background:bg, padding:"1px 6px", borderRadius:9999 }}>{weight}</span>
+                          </div>
+                          <div style={{ fontSize:20, fontWeight:900, color:pct!=null?gradeColor(pct):"#94a3b8" }}>
+                            {pct != null ? `${pct}%` : "—"}
+                          </div>
+                          {/* Class standing detail */}
+                          {label.includes("Class") && td.csEntry && (
+                            <div style={{ marginTop:5 }}>
+                              {[["Project",td.csEntry.project],["Recitation",td.csEntry.recitation],["Attendance",td.csEntry.attendance]].map(([lbl,v])=>(
+                                <div key={lbl} style={{ fontSize:10, color:"#64748b", display:"flex", justifyContent:"space-between" }}>
+                                  <span>{lbl}</span><span style={{ fontWeight:700 }}>{v != null ? `${v}/100` : "—"}</span>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
                       ))}
-                    </tbody>
-                  </table>
-                )
-              }
+                    </div>
+                  </div>
+                );
+              })}
             </div>
-            <div style={{ padding:"12px 20px", borderTop:"1px solid #e2e8f0", background:"#fafafa" }}>
-              <Btn variant="secondary" onClick={()=>setDetailStudent(null)}>Close</Btn>
+
+            <div style={{ padding:"12px 20px", borderTop:"1px solid #e2e8f0", background:"#fafafa", display:"flex", gap:10, justifyContent:"flex-end" }}>
+              <Btn variant="secondary" onClick={() => { setDetailRow(null); setCsModal({student:detailRow._student, course:detailRow._course}); }}>
+                🏆 Edit Class Standing
+              </Btn>
+              <Btn variant="secondary" onClick={() => setDetailRow(null)}>Close</Btn>
             </div>
           </div>
         </div>
@@ -3895,8 +5195,7 @@ function TeacherGrades({ user, courses, allUsers, examSubmissions }) {
     </div>
   );
 }
-
-function TeacherDashboard({ user, onLogout, courses, allUsers, examSubmissions }) {
+function TeacherDashboard({ user, onLogout, courses, allUsers, examSubmissions, enrollments }) {
   const myCourses = courses.filter(c => c.teacher===user.id);
   const [page, setPage] = useState("courses");
   const nav = [
@@ -3904,8 +5203,8 @@ function TeacherDashboard({ user, onLogout, courses, allUsers, examSubmissions }
     { id:"grades",  label:"Grade Students",icon:"📝", badge:null },
   ];
   const pages = {
-    courses: <TeacherCourses user={user} courses={courses} allUsers={allUsers} />,
-    grades:  <TeacherGrades  user={user} courses={courses} allUsers={allUsers} examSubmissions={examSubmissions} />,
+    courses: <TeacherCourses user={user} courses={courses} allUsers={allUsers} enrollments={enrollments} />,
+    grades:  <TeacherGrades  user={user} courses={courses} allUsers={allUsers} examSubmissions={examSubmissions} enrollments={enrollments} />,
   };
   return (
     <div style={{ display:"flex", height:"100vh", overflow:"hidden" }}>
@@ -3922,16 +5221,192 @@ function TeacherDashboard({ user, onLogout, courses, allUsers, examSubmissions }
 // ═══════════════════════════════════════════════════════════════════════════════
 export default function App() {
   const [currentUser, setCurrentUser] = useState(null);
-  const [users,   setUsers]   = useState(INIT_USERS);
-  const [courses, setCourses] = useState(INIT_COURSES);
+  const [users,       setUsers]       = useState([]);
+  const [courses,     setCourses]     = useState([]);
+  const [enrollments, setEnrollments] = useState([]);
+
+  // ── Fetch users ────────────────────────────────────────────────────────────
+  useEffect(() => {
+    async function loadUsers() {
+      const [userRes, stuRes, tchRes] = await Promise.all([
+        supabase.from("users").select("*").eq("is_active", true),
+        supabase.from("students").select("*"),
+        supabase.from("teachers").select("*"),
+      ]);
+      if (!userRes.data) return;
+      const stuMap = {};
+      const tchMap = {};
+      (stuRes.data || []).forEach(s => { stuMap[s.user_id] = s; });
+      (tchRes.data || []).forEach(t => { tchMap[t.user_id] = t; });
+      setUsers(userRes.data.map(u => normalizeUser({
+        ...u,
+        students: stuMap[u.user_id] ? [stuMap[u.user_id]] : [],
+        teachers: tchMap[u.user_id] ? [tchMap[u.user_id]] : [],
+      })));
+    }
+    loadUsers();
+  }, []);
+
+  // ── Fetch courses (with teacher assignments and schedules) ──────────────────
+  useEffect(() => {
+    async function loadCourses() {
+      const [courseRes, tcaRes, schedRes] = await Promise.all([
+        supabase.from("courses").select("*").eq("is_active", true),
+        supabase.from("teacher_course_assignments")
+          .select("teacher_id, course_id, schedule_id"),
+        supabase.from("schedules").select("schedule_id, course_id, schedule_label, year_level, semester"),
+      ]);
+      const courses   = courseRes.data  || [];
+      const tcas      = tcaRes.data     || [];
+      const schedules = schedRes.data   || [];
+
+      // Also fetch teacher display info
+      const teacherIds = [...new Set(tcas.map(t => t.teacher_id))];
+      let teacherMap = {};
+      if (teacherIds.length) {
+        const { data: tUsers } = await supabase
+          .from("users").select("user_id, display_id, full_name").in("user_id", teacherIds);
+        (tUsers || []).forEach(u => { teacherMap[u.user_id] = u; });
+      }
+
+      setCourses(courses.map(c => {
+        const tca = tcas.find(t => t.course_id === c.course_id);
+        const sch = schedules.find(s => s.schedule_id === tca?.schedule_id);
+        const teacher = tca ? teacherMap[tca.teacher_id] : null;
+        return {
+          id:          c.course_code,
+          code:        c.course_code,
+          name:        c.course_name,
+          teacher:     teacher?.display_id   || "",
+          teacherName: teacher?.full_name    || "Unassigned",
+          schedule:    sch?.schedule_label   || "",
+          units:       c.units,
+          yearLevel:   sch?.year_level       || "",
+          semester:    sch?.semester         || "",
+          _uuid:       c.course_id,
+        };
+      }));
+    }
+    loadCourses();
+  }, []);
+
+  // ── Fetch all enrollments ──────────────────────────────────────────────────
+  useEffect(() => {
+    async function loadEnrollments() {
+      const { data } = await supabase
+        .from("student_course_assignments")
+        .select("student_id, course_id, final_grade, enrollment_status");
+      if (!data) return;
+      // Resolve student display_id and course_code from already-loaded state
+      // We fetch users and courses separately to map UUIDs → display IDs
+      const [uRes, cRes] = await Promise.all([
+        supabase.from("users").select("user_id, display_id").eq("role", "student"),
+        supabase.from("courses").select("course_id, course_code"),
+      ]);
+      const uMap = {};
+      const cMap = {};
+      (uRes.data || []).forEach(u => { uMap[u.user_id] = u.display_id; });
+      (cRes.data || []).forEach(c => { cMap[c.course_id] = c.course_code; });
+      setEnrollments(data.map(row => ({
+        studentId: uMap[row.student_id] || row.student_id,
+        courseId:  cMap[row.course_id]  || row.course_id,
+        grade:     row.final_grade      ?? null,
+        status:    row.enrollment_status || "Enrolled",
+      })));
+    }
+    loadEnrollments();
+  }, []);
 
   // ── Global exam submissions — lifted so Teacher sees Student results instantly ──
-  const [examSubmissions, setExamSubmissions] = useState(INIT_EXAM_SUBMISSIONS);
-  const handleSubmitExam = (submission) => {
+  const [examSubmissions, setExamSubmissions] = useState([]);
+
+  // Load existing exam submissions from Supabase on mount.
+  // Previously this was seeded from INIT_EXAM_SUBMISSIONS=[] so nothing showed
+  // on page load — teacher grade view was always empty until a student took an exam
+  // in the current session.
+  useEffect(() => {
+    async function loadExamSubmissions() {
+      const { data: subs } = await supabase
+        .from("exam_submissions")
+        .select("exam_submission_id, exam_id, student_id, score, total_points, submitted_at");
+      if (!subs?.length) return;
+
+      // Resolve exam_id → course_code (two hops: exam → course → course_code)
+      const examIds  = [...new Set(subs.map(s => s.exam_id))];
+      const { data: examRows } = await supabase
+        .from("exams").select("exam_id, course_id").in("exam_id", examIds);
+      const courseIds = [...new Set((examRows || []).map(e => e.course_id))];
+      const { data: courseRows } = await supabase
+        .from("courses").select("course_id, course_code").in("course_id", courseIds);
+
+      const courseCodeMap = {};
+      (courseRows || []).forEach(c => { courseCodeMap[c.course_id] = c.course_code; });
+      const examCourseMap = {};
+      (examRows || []).forEach(e => { examCourseMap[e.exam_id] = courseCodeMap[e.course_id] || ""; });
+
+      // Resolve student_id (UUID) → display_id (STU001, …)
+      const studentIds = [...new Set(subs.map(s => s.student_id))];
+      const { data: userRows } = await supabase
+        .from("users").select("user_id, display_id").in("user_id", studentIds);
+      const userMap = {};
+      (userRows || []).forEach(u => { userMap[u.user_id] = u.display_id; });
+
+      setExamSubmissions(subs.map(s => ({
+        id:          s.exam_submission_id,
+        examId:      s.exam_id,
+        courseId:    examCourseMap[s.exam_id] || "",
+        studentId:   userMap[s.student_id]    || s.student_id,
+        answers:     {},          // per-question answers not stored in this table
+        score:       s.score,
+        totalPoints: s.total_points,
+        submittedAt: s.submitted_at,
+        graded:      true,
+      })));
+    }
+    loadExamSubmissions();
+  }, []);
+  const handleSubmitExam = async (submission) => {
+    // 1. Upsert the exam submission header and get back the DB-assigned ID
+    const { data: savedSub, error: subErr } = await supabase
+      .from("exam_submissions")
+      .upsert({
+        exam_id:      submission.examId,
+        student_id:   submission.studentUuid,   // UUID — see note below
+        score:        submission.score,
+        total_points: submission.totalPoints,
+      }, { onConflict: "exam_id,student_id" })
+      .select("exam_submission_id")
+      .single();
+
+    // 2. Write per-question answers (only when exam questions have real DB UUIDs).
+    //    For DB-sourced exams the question IDs ARE UUIDs; client-generated exams
+    //    (ExamBuilder sessions where onSave was never called) would fail the FK —
+    //    we guard with a UUID regex to skip those gracefully.
+    const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    const examIdIsUUID = isUUID.test(submission.examId);
+
+    if (!subErr && savedSub && examIdIsUUID && submission.questionResults?.length) {
+      const answerRows = submission.questionResults
+        .filter(qr => isUUID.test(qr.questionId))   // only persisted questions
+        .map(qr => ({
+          exam_submission_id: savedSub.exam_submission_id,
+          question_id:        qr.questionId,
+          given_answer:       qr.givenAnswer  ?? null,
+          is_correct:         qr.isCorrect    ?? false,
+          points_awarded:     qr.pointsAwarded ?? 0,
+        }));
+      if (answerRows.length) {
+        await supabase.from("exam_question_answers").upsert(
+          answerRows,
+          { onConflict: "exam_submission_id,question_id" }
+        );
+      }
+    }
+
+    // 3. Merge into local state so Teacher sees it instantly
     setExamSubmissions(prev => {
-      // Replace if student re-took (shouldn't normally happen, but safe guard)
-      const exists = prev.findIndex(s => s.examId===submission.examId && s.studentId===submission.studentId);
-      if (exists >= 0) { const n=[...prev]; n[exists]=submission; return n; }
+      const exists = prev.findIndex(s => s.examId === submission.examId && s.studentId === submission.studentId);
+      if (exists >= 0) { const n = [...prev]; n[exists] = submission; return n; }
       return [...prev, submission];
     });
   };
@@ -3942,10 +5417,10 @@ export default function App() {
       {!currentUser
         ? <LoginPage onLogin={setCurrentUser} />
         : currentUser.role==="admin"
-          ? <AdminDashboard   user={currentUser} onLogout={()=>setCurrentUser(null)} users={users} setUsers={setUsers} courses={courses} setCourses={setCourses} />
+          ? <AdminDashboard   user={currentUser} onLogout={()=>setCurrentUser(null)} users={users} setUsers={setUsers} courses={courses} setCourses={setCourses} enrollments={enrollments} setEnrollments={setEnrollments} />
           : currentUser.role==="student"
-          ? <StudentDashboard user={currentUser} onLogout={()=>setCurrentUser(null)} courses={courses} examSubmissions={examSubmissions} onSubmitExam={handleSubmitExam} />
-          : <TeacherDashboard user={currentUser} onLogout={()=>setCurrentUser(null)} courses={courses} allUsers={users} examSubmissions={examSubmissions} />
+          ? <StudentDashboard user={currentUser} onLogout={()=>setCurrentUser(null)} courses={courses} examSubmissions={examSubmissions} onSubmitExam={handleSubmitExam} enrollments={enrollments} />
+          : <TeacherDashboard user={currentUser} onLogout={()=>setCurrentUser(null)} courses={courses} allUsers={users} examSubmissions={examSubmissions} enrollments={enrollments} />
       }
     </>
   );
