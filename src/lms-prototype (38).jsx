@@ -407,15 +407,17 @@ const INIT_EXAM_SUBMISSIONS = [];
 // downstream components stay unchanged.
 
 const normalizeUser = (row) => ({
-  id:          row.display_id,
-  _uuid:       row.user_id,   // internal UUID — used as FK in DB inserts (created_by, student_id, etc.)
-  username:    row.username,
-  role:        row.role,
-  fullName:    row.full_name,
-  email:       row.email        || "",
-  civilStatus: row.civil_status || "",
-  birthdate:   row.birthdate    || "",
-  password:    "",   // never exposed; login uses verify_password RPC
+  id:            row.display_id,
+  _uuid:         row.user_id,
+  _passwordHash: row.password_hash || "",   // kept in memory only — never rendered
+  username:      row.username,
+  role:          row.role,
+  fullName:      row.full_name,
+  email:         row.email        || "",
+  civilStatus:   row.civil_status || "",
+  birthdate:     row.birthdate    || "",
+  address:       row.address      || "",
+  password:      "",
   ...(row.students?.[0] && {
     yearLevel: row.students[0].year_level,
     semester:  row.students[0].semester,
@@ -1016,7 +1018,7 @@ function AdminOverview({ users, courses, enrollments }) {
 }
 
 function AdminCreateAccounts({ users, setUsers }) {
-  const emptyForm = { username:"", fullName:"", email:"", civilStatus:"Single", birthdate:"", password:"", yearLevel:"1st Year", semester:"1st Semester" };
+  const emptyForm = { username:"", fullName:"", email:"", civilStatus:"Single", birthdate:"", password:"", address:"", yearLevel:"1st Year", semester:"1st Semester" };
   const [role, setRole]     = useState("student");
   const [form, setForm]     = useState(emptyForm);
   const [errors, setErrors] = useState({});
@@ -1071,6 +1073,7 @@ function AdminCreateAccounts({ users, setUsers }) {
         password_hash: hashData,
         civil_status:  form.civilStatus || null,
         birthdate:     form.birthdate   || null,
+        address:       form.address.trim() || null,
         role,
       })
       .select()
@@ -1102,6 +1105,7 @@ function AdminCreateAccounts({ users, setUsers }) {
       email:       form.email.trim(),
       civilStatus: form.civilStatus,
       birthdate:   form.birthdate,
+      address:     form.address.trim(),
       role,
       yearLevel:   form.yearLevel,
       semester:    form.semester,
@@ -1158,6 +1162,8 @@ function AdminCreateAccounts({ users, setUsers }) {
 
           <FF label="Password" required error={errors.password}><Input type="password" value={form.password} onChange={e=>upd("password",e.target.value)} placeholder="Initial password" /></FF>
 
+          <FF label="Address"><Input value={form.address} onChange={e=>upd("address",e.target.value)} placeholder="e.g. 123 Main St, City" /></FF>
+
           {role==="student" && (
             <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8 }}>
               <FF label="Year Level">
@@ -1205,7 +1211,7 @@ function AdminCreateAccounts({ users, setUsers }) {
               <div style={{ fontWeight:800, fontSize:14, color:"#1e293b", marginBottom:4 }}>{sel.fullName}</div>
               <Badge color={sel.role==="student"?"success":"purple"}>{sel.role}</Badge>
             </div>
-            {[["ID",sel.id],["Username",sel.username],["Email",sel.email],["Civil Status",sel.civilStatus],["Birthdate",sel.birthdate],["Year Level",sel.yearLevel],["Semester",sel.semester]].filter(([,v])=>v).map(([l,v])=>(
+            {[["ID",sel.id],["Username",sel.username],["Email",sel.email],["Civil Status",sel.civilStatus],["Birthdate",sel.birthdate],["Address",sel.address],["Year Level",sel.yearLevel],["Semester",sel.semester]].filter(([,v])=>v).map(([l,v])=>(
               <div key={l} style={{ marginBottom:9 }}>
                 <div style={{ fontSize:9, fontWeight:700, color:"#94a3b8", textTransform:"uppercase", letterSpacing:"0.07em" }}>{l}</div>
                 <div style={{ fontSize:12, color:"#334155", marginTop:2 }}>{v}</div>
@@ -1350,6 +1356,115 @@ function AdminCreateCourses({ courses, setCourses, users, enrollments: enrollmen
     showToast("Teacher assigned!");
   };
 
+  // ── Selected course for admin actions ──────────────────────────────────────
+  const [selectedCourse, setSelectedCourse] = useState(null);
+  const [confirmModal,   setConfirmModal]   = useState(null);
+  const [editModal,      setEditModal]      = useState(null); // { course, schedule, yearLevel, semester }
+  const [editSaving,     setEditSaving]     = useState(false);
+
+  const openEditModal = (course) => {
+    setEditModal({
+      course,
+      schedule:  course.schedule  || "",
+      yearLevel: course.yearLevel || "1st Year",
+      semester:  course.semester  || "1st Semester",
+    });
+  };
+
+  const saveCourseEdit = async () => {
+    if (!editModal) return;
+    setEditSaving(true);
+    const { course, schedule, yearLevel, semester } = editModal;
+
+    // ── Why not upsert ────────────────────────────────────────────────────────
+    // schedules has no UNIQUE constraint on course_id alone, so upsert always
+    // falls through to INSERT. The RLS policy on "schedules" has no explicit
+    // WITH CHECK clause, so Postgres reuses the USING expression to gate INSERTs
+    // too — blocking the operation with a 403 "violates row-level security policy".
+    //
+    // Fix: UPDATE the existing row by its primary key (schedule_id) if it exists,
+    // INSERT only for courses that have never had a schedule row before.
+    let error = null;
+
+    if (course._scheduleId) {
+      // UPDATE the existing schedule row directly — no INSERT, no RLS block
+      ({ error } = await supabase
+        .from("schedules")
+        .update({
+          schedule_label: schedule.trim() || null,
+          year_level:     yearLevel       || null,
+          semester:       semester        || null,
+        })
+        .eq("schedule_id", course._scheduleId));
+    } else {
+      // No schedule row yet — INSERT fresh, then stash the new schedule_id
+      const { data: newSch, error: insErr } = await supabase
+        .from("schedules")
+        .insert({
+          course_id:      course._uuid,
+          schedule_label: schedule.trim() || null,
+          academic_year:  "2025-2026",
+          year_level:     yearLevel       || null,
+          semester:       semester        || null,
+        })
+        .select("schedule_id")
+        .single();
+      error = insErr;
+      if (!insErr && newSch) {
+        // Also link this new schedule to the teacher assignment row
+        await supabase
+          .from("teacher_course_assignments")
+          .update({ schedule_id: newSch.schedule_id })
+          .eq("course_id",     course._uuid)
+          .eq("academic_year", "2025-2026")
+          .eq("semester",      "1st Semester");
+        // Store so subsequent edits use the UPDATE path
+        setCourses(prev => prev.map(c =>
+          c._uuid === course._uuid ? { ...c, _scheduleId: newSch.schedule_id } : c
+        ));
+      }
+    }
+
+    if (error) { showToast("Error saving: " + error.message); setEditSaving(false); return; }
+
+    setCourses(prev => prev.map(c =>
+      c._uuid === course._uuid ? { ...c, schedule, yearLevel, semester } : c
+    ));
+    setSelectedCourse(prev => prev?._uuid === course._uuid
+      ? { ...prev, schedule, yearLevel, semester } : prev);
+    setEditModal(null);
+    setEditSaving(false);
+    showToast(`"${course.name}" updated!`);
+  };
+
+  const deleteCourse = async (course) => {
+    const { error } = await supabase
+      .from("courses").delete().eq("course_id", course._uuid);
+    if (error) { showToast("Error deleting course: " + error.message); return; }
+    setCourses(prev => prev.filter(c => c._uuid !== course._uuid));
+    setEnrollments(prev => prev.filter(e => e.courseId !== course.id));
+    setSelectedCourse(null);
+    setConfirmModal(null);
+    showToast(`"${course.name}" deleted.`);
+  };
+
+  const clearCourseData = async (course) => {
+    const [matErr, examErr, enrollErr] = await Promise.all([
+      supabase.from("materials").delete().eq("course_id", course._uuid).then(r => r.error),
+      supabase.from("exams").delete().eq("course_id", course._uuid).then(r => r.error),
+      supabase.from("student_course_assignments").delete().eq("course_id", course._uuid).then(r => r.error),
+    ]);
+    await supabase.from("teacher_course_assignments").delete().eq("course_id", course._uuid);
+    if (matErr || examErr || enrollErr) {
+      showToast("Partial error clearing data."); return;
+    }
+    setEnrollments(prev => prev.filter(e => e.courseId !== course.id));
+    setCourses(prev => prev.map(c => c._uuid === course._uuid
+      ? { ...c, teacher: "", teacherName: "Unassigned" } : c));
+    setConfirmModal(null);
+    showToast(`All data cleared for "${course.name}".`);
+  };
+
   const courseCols = [
     {field:"code",       header:"Code",       width:80},
     {field:"name",       header:"Course Name"},
@@ -1358,6 +1473,14 @@ function AdminCreateCourses({ courses, setCourses, users, enrollments: enrollmen
     {field:"units",      header:"Units",      width:55},
     {field:"yearLevel",  header:"Year",       width:90},
     {field:"semester",   header:"Semester",   width:110},
+    {field:"status",     header:"Status",     width:90,
+      cellRenderer: v => (
+        <span style={{ fontSize:10, fontWeight:700, padding:"2px 8px", borderRadius:9999,
+          background: v === "Finished" ? "#fef3c7" : "#dcfce7",
+          color:      v === "Finished" ? "#92400e" : "#166534" }}>
+          {v || "Ongoing"}
+        </span>
+      )},
   ];
 
   const enrollCols = [
@@ -1402,10 +1525,106 @@ function AdminCreateCourses({ courses, setCourses, users, enrollments: enrollmen
               <Btn onClick={addCourse} style={{ marginTop:4 }}>✦ Create Course</Btn>
             </div>
             <div style={{ flex:1, padding:16, display:"flex", flexDirection:"column", overflow:"hidden", background:"#f8fafc" }}>
-              <div style={{ fontSize:11, fontWeight:700, color:"#64748b", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:10 }}>All Courses ({courses.length})</div>
-              <div style={{ flex:1, overflow:"hidden" }}><LMSGrid columns={courseCols} rowData={courses} height="100%" /></div>
+              <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:10 }}>
+                <div style={{ fontSize:11, fontWeight:700, color:"#64748b", textTransform:"uppercase", letterSpacing:"0.06em" }}>All Courses ({courses.length})</div>
+                {selectedCourse && (
+                  <div style={{ display:"flex", gap:6, alignItems:"center" }}>
+                    <span style={{ fontSize:11, fontWeight:700, color:"#0f172a" }}>{selectedCourse.code} selected</span>
+                    <Btn size="sm" variant="secondary"
+                      onClick={() => openEditModal(selectedCourse)}
+                      style={{ fontSize:11, borderColor:"#6366f1", color:"#4338ca", background:"#ede9fe" }}>
+                      ✏ Edit Course
+                    </Btn>
+                    <Btn size="sm" variant="secondary"
+                      onClick={() => setConfirmModal({ type:"clear", course: selectedCourse })}
+                      style={{ fontSize:11, borderColor:"#f59e0b", color:"#92400e", background:"#fef3c7" }}>
+                      🧹 Clear Data
+                    </Btn>
+                    <Btn size="sm" variant="danger"
+                      onClick={() => setConfirmModal({ type:"delete", course: selectedCourse })}>
+                      🗑 Delete Course
+                    </Btn>
+                    <button onClick={() => setSelectedCourse(null)}
+                      style={{ border:"none", background:"none", cursor:"pointer", color:"#94a3b8", fontSize:16 }}>×</button>
+                  </div>
+                )}
+              </div>
+              <div style={{ flex:1, overflow:"hidden" }}>
+                <LMSGrid columns={courseCols} rowData={courses}
+                  onRowClick={c => setSelectedCourse(prev => prev?._uuid === c._uuid ? null : c)}
+                  selectedId={selectedCourse?.id} height="100%" />
+              </div>
             </div>
           </>
+        )}
+
+        {/* ── Edit Course Modal ──────────────────────────────────────── */}
+        {editModal && (
+          <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,0.45)", zIndex:1000, display:"flex", alignItems:"center", justifyContent:"center" }}>
+            <div style={{ background:"#fff", borderRadius:14, padding:28, width:400, boxShadow:"0 20px 60px rgba(0,0,0,.25)" }}>
+              <div style={{ fontWeight:900, fontSize:15, color:"#0f172a", marginBottom:4 }}>✏ Edit Course Details</div>
+              <div style={{ fontSize:12, color:"#64748b", marginBottom:18 }}>
+                Updating <strong>{editModal.course.code}</strong> — {editModal.course.name}
+              </div>
+              <div style={{ display:"flex", flexDirection:"column", gap:12 }}>
+                <FF label="Schedule">
+                  <Input
+                    value={editModal.schedule}
+                    onChange={e => setEditModal(m => ({ ...m, schedule: e.target.value }))}
+                    placeholder="e.g. MWF 8:00–9:00 AM"
+                  />
+                </FF>
+                <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10 }}>
+                  <FF label="Year Level">
+                    <Sel value={editModal.yearLevel} onChange={e => setEditModal(m => ({ ...m, yearLevel: e.target.value }))}>
+                      {["1st Year","2nd Year","3rd Year","4th Year"].map(y => <option key={y}>{y}</option>)}
+                    </Sel>
+                  </FF>
+                  <FF label="Semester">
+                    <Sel value={editModal.semester} onChange={e => setEditModal(m => ({ ...m, semester: e.target.value }))}>
+                      {["1st Semester","2nd Semester","Summer"].map(s => <option key={s}>{s}</option>)}
+                    </Sel>
+                  </FF>
+                </div>
+              </div>
+              <div style={{ display:"flex", gap:8, justifyContent:"flex-end", marginTop:20 }}>
+                <Btn variant="secondary" size="sm" onClick={() => setEditModal(null)} disabled={editSaving}>Cancel</Btn>
+                <Btn size="sm" onClick={saveCourseEdit} disabled={editSaving}>
+                  {editSaving ? "⏳ Saving…" : "💾 Save Changes"}
+                </Btn>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ── Confirmation Modal ─────────────────────────────────────── */}
+        {confirmModal && (
+          <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,0.45)", zIndex:1000, display:"flex", alignItems:"center", justifyContent:"center" }}>
+            <div style={{ background:"#fff", borderRadius:14, padding:28, width:380, boxShadow:"0 20px 60px rgba(0,0,0,.25)" }}>
+              <div style={{ fontSize:20, marginBottom:8 }}>
+                {confirmModal.type === "delete" ? "🗑" : "🧹"}
+              </div>
+              <div style={{ fontWeight:900, fontSize:15, color:"#0f172a", marginBottom:6 }}>
+                {confirmModal.type === "delete" ? "Delete Course" : "Clear Course Data"}
+              </div>
+              <div style={{ fontSize:13, color:"#475569", marginBottom:18, lineHeight:1.6 }}>
+                {confirmModal.type === "delete"
+                  ? <>Are you sure you want to <strong>permanently delete</strong> <em>{confirmModal.course.name}</em>? This will remove all materials, exams, submissions, and enrollments. This cannot be undone.</>
+                  : <>This will delete all <strong>materials, exams, student enrollments, and teacher assignments</strong> for <em>{confirmModal.course.name}</em>, but keep the course itself. This cannot be undone.</>
+                }
+              </div>
+              <div style={{ display:"flex", gap:8, justifyContent:"flex-end" }}>
+                <Btn variant="secondary" size="sm" onClick={() => setConfirmModal(null)}>Cancel</Btn>
+                <Btn variant="danger" size="sm" onClick={() =>
+                  confirmModal.type === "delete"
+                    ? deleteCourse(confirmModal.course)
+                    : clearCourseData(confirmModal.course)
+                }>
+                  {confirmModal.type === "delete" ? "Yes, Delete" : "Yes, Clear"}
+                </Btn>
+              </div>
+            </div>
+          </div>
         )}
 
         {tab==="enroll" && (
@@ -2645,25 +2864,78 @@ function StudentCourses({ user, courses, onSubmitExam, examSubmissions, enrollme
     : DefaultCourseView;
 }
 
-function StudentProfile({ user }) {
-  const [editing, setEditing] = useState(false);
-  const [form, setForm]       = useState({...user});
-  const [toast, setToast]     = useState("");
+function StudentProfile({ user, onUpdateUser }) {
+  const [editing,  setEditing]  = useState(false);
+  const [form,     setForm]     = useState({ ...user });
+  const [pwForm,   setPwForm]   = useState({ current:"", next:"", confirm:"" });
+  const [pwErr,    setPwErr]    = useState("");
+  const [saving,   setSaving]   = useState(false);
+  const [pwSaving, setPwSaving] = useState(false);
+  const [toast,    setToast]    = useState("");
+  const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(""), 2800); };
 
-  const save = () => { setEditing(false); setToast("Profile updated!"); setTimeout(()=>setToast(""),2500); };
+  const startEditing  = () => { setForm({ ...user }); setEditing(true); };
+  const cancelEditing = () => { setForm({ ...user }); setEditing(false); };
+
+  const save = async () => {
+    setSaving(true);
+    const { error } = await supabase.from("users").update({
+      full_name:    form.fullName    || null,
+      username:     form.username    || null,
+      email:        form.email       || null,
+      civil_status: form.civilStatus || null,
+      birthdate:    form.birthdate   || null,
+      address:      form.address     || null,
+    }).eq("user_id", user._uuid);
+    if (error) { showToast("Error: " + error.message); setSaving(false); return; }
+    onUpdateUser({ ...user, ...form });
+    setEditing(false); setSaving(false);
+    showToast("Profile updated!");
+  };
+
+  const changePassword = async () => {
+    setPwErr("");
+    if (!pwForm.current) { setPwErr("Enter your current password."); return; }
+    if (pwForm.next.length < 6) { setPwErr("New password must be at least 6 characters."); return; }
+    if (pwForm.next !== pwForm.confirm) { setPwErr("New passwords do not match."); return; }
+    setPwSaving(true);
+    // Verify current password first — param names must match the DB function signature
+    const { data: valid, error: verifyErr } = await supabase.rpc("verify_password", {
+      plain: pwForm.current, hash: user._passwordHash || "",
+    });
+    if (verifyErr || !valid) {
+      setPwErr("Current password is incorrect."); setPwSaving(false); return;
+    }
+    // Hash and save new password
+    const { data: newHash, error: hashErr } = await supabase.rpc("hash_password", { plain: pwForm.next });
+    if (hashErr || !newHash) { setPwErr("Error hashing password."); setPwSaving(false); return; }
+    const { error: updErr } = await supabase.from("users")
+      .update({ password_hash: newHash }).eq("user_id", user._uuid);
+    if (updErr) { setPwErr("Error saving: " + updErr.message); setPwSaving(false); return; }
+    setPwForm({ current:"", next:"", confirm:"" });
+    setPwSaving(false);
+    showToast("Password changed successfully!");
+  };
+
+  const fieldVal  = (f) => editing
+    ? <Input value={form[f]||""} onChange={e=>setForm(p=>({...p,[f]:e.target.value}))} />
+    : <div style={{ padding:"8px 10px", background:"#f8fafc", borderRadius:6, border:"1px solid #e2e8f0", fontSize:13, color:"#334155", minHeight:35 }}>{user[f]||<span style={{color:"#94a3b8"}}>—</span>}</div>;
 
   return (
     <div style={{ display:"flex", flexDirection:"column", height:"100%" }}>
       <TopBar title="My Profile" subtitle="Student · Account Settings"
-        actions={<Btn variant={editing?"success":"secondary"} onClick={editing?save:()=>setEditing(true)}>{editing?"✓ Save Changes":"✏ Edit Profile"}</Btn>}
+        actions={editing
+          ? <div style={{display:"flex",gap:8}}>
+              <Btn variant="secondary" onClick={cancelEditing} disabled={saving}>✕ Cancel</Btn>
+              <Btn variant="success"   onClick={save}          disabled={saving}>{saving?"⏳ Saving…":"✓ Save Changes"}</Btn>
+            </div>
+          : <Btn variant="secondary" onClick={startEditing}>✏ Edit Profile</Btn>}
       />
-      <div style={{ flex:1, padding:"20px 22px", overflow:"hidden", display:"flex", gap:18 }}>
-        {/* Avatar card */}
+      <div style={{ flex:1, padding:"20px 22px", overflowY:"auto", display:"flex", gap:18 }}>
+        {/* Sidebar */}
         <div style={{ width:210, flexShrink:0, display:"flex", flexDirection:"column", gap:12 }}>
           <Card style={{ textAlign:"center", padding:"22px 16px" }}>
-            <div style={{ width:64, height:64, borderRadius:"50%", background:"#d1fae5", border:"3px solid #10b981", display:"flex", alignItems:"center", justifyContent:"center", margin:"0 auto 10px", fontSize:26, fontWeight:900, color:"#065f46" }}>
-              {user.fullName?.charAt(0)}
-            </div>
+            <div style={{ width:64, height:64, borderRadius:"50%", background:"#d1fae5", border:"3px solid #10b981", display:"flex", alignItems:"center", justifyContent:"center", margin:"0 auto 10px", fontSize:26, fontWeight:900, color:"#065f46" }}>{user.fullName?.charAt(0)}</div>
             <div style={{ fontWeight:800, fontSize:14, color:"#1e293b", marginBottom:4 }}>{user.fullName}</div>
             <Badge color="success">Student</Badge>
             <div style={{ marginTop:10, fontSize:11, color:"#94a3b8" }}>{user.id}</div>
@@ -2679,20 +2951,206 @@ function StudentProfile({ user }) {
           </Card>
           {toast && <Toast msg={toast} />}
         </div>
-        {/* Edit form */}
-        <Card style={{ flex:1 }}>
-          <div style={{ fontWeight:800, fontSize:14, color:"#0f172a", marginBottom:16 }}>Personal Information</div>
-          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:14 }}>
-            {[{l:"Full Name",f:"fullName"},{l:"Username",f:"username"},{l:"Email",f:"email"},{l:"Civil Status",f:"civilStatus"},{l:"Birthdate",f:"birthdate",t:"date"}].map(({l,f,t})=>(
-              <FF key={f} label={l}>
+
+        {/* Main content */}
+        <div style={{ flex:1, display:"flex", flexDirection:"column", gap:14 }}>
+          {/* Personal Info */}
+          <Card>
+            <div style={{ fontWeight:800, fontSize:14, color:"#0f172a", marginBottom:16 }}>Personal Information</div>
+            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:14 }}>
+              <FF label="Full Name">{fieldVal("fullName")}</FF>
+              <FF label="Username">{fieldVal("username")}</FF>
+              <FF label="Email">{fieldVal("email")}</FF>
+              <FF label="Civil Status">
                 {editing
-                  ? <Input type={t} value={form[f]||""} onChange={e=>setForm(p=>({...p,[f]:e.target.value}))} />
-                  : <div style={{ padding:"8px 10px", background:"#f8fafc", borderRadius:6, border:"1px solid #e2e8f0", fontSize:13, color:"#334155", minHeight:35 }}>{user[f]||<span style={{color:"#94a3b8"}}>—</span>}</div>
-                }
+                  ? <Sel value={form.civilStatus||""} onChange={e=>setForm(p=>({...p,civilStatus:e.target.value}))}>
+                      {["Single","Married","Divorced","Widowed"].map(s=><option key={s}>{s}</option>)}
+                    </Sel>
+                  : <div style={{ padding:"8px 10px", background:"#f8fafc", borderRadius:6, border:"1px solid #e2e8f0", fontSize:13, color:"#334155", minHeight:35 }}>{user.civilStatus||<span style={{color:"#94a3b8"}}>—</span>}</div>}
               </FF>
-            ))}
-          </div>
-        </Card>
+              <FF label="Birthdate">
+                {editing
+                  ? <Input type="date" value={form.birthdate||""} onChange={e=>setForm(p=>({...p,birthdate:e.target.value}))} />
+                  : <div style={{ padding:"8px 10px", background:"#f8fafc", borderRadius:6, border:"1px solid #e2e8f0", fontSize:13, color:"#334155", minHeight:35 }}>{user.birthdate||<span style={{color:"#94a3b8"}}>—</span>}</div>}
+              </FF>
+            </div>
+            {/* Address — full width */}
+            <div style={{ marginTop:14 }}>
+              <FF label="Address">
+                {editing
+                  ? <Input value={form.address||""} onChange={e=>setForm(p=>({...p,address:e.target.value}))} placeholder="e.g. 123 Main St, City" />
+                  : <div style={{ padding:"8px 10px", background:"#f8fafc", borderRadius:6, border:"1px solid #e2e8f0", fontSize:13, color:"#334155", minHeight:35 }}>{user.address||<span style={{color:"#94a3b8"}}>—</span>}</div>}
+              </FF>
+            </div>
+          </Card>
+
+          {/* Change Password */}
+          <Card>
+            <div style={{ fontWeight:800, fontSize:14, color:"#0f172a", marginBottom:4 }}>🔒 Change Password</div>
+            <div style={{ fontSize:12, color:"#64748b", marginBottom:14 }}>Leave blank to keep your current password.</div>
+            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:12 }}>
+              <FF label="Current Password">
+                <Input type="password" value={pwForm.current} onChange={e=>setPwForm(p=>({...p,current:e.target.value}))} placeholder="Current password" />
+              </FF>
+              <FF label="New Password">
+                <Input type="password" value={pwForm.next} onChange={e=>setPwForm(p=>({...p,next:e.target.value}))} placeholder="Min. 6 characters" />
+              </FF>
+              <FF label="Confirm New Password">
+                <Input type="password" value={pwForm.confirm} onChange={e=>setPwForm(p=>({...p,confirm:e.target.value}))} placeholder="Repeat new password" />
+              </FF>
+            </div>
+            {pwErr && <div style={{ marginTop:8, fontSize:12, color:"#dc2626", fontWeight:700 }}>⚠ {pwErr}</div>}
+            <div style={{ marginTop:12 }}>
+              <Btn onClick={changePassword} disabled={pwSaving} variant="secondary">
+                {pwSaving ? "⏳ Saving…" : "🔒 Update Password"}
+              </Btn>
+            </div>
+          </Card>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── TeacherProfile ────────────────────────────────────────────────────────────
+function TeacherProfile({ user, onUpdateUser }) {
+  const [editing,  setEditing]  = useState(false);
+  const [form,     setForm]     = useState({ ...user });
+  const [pwForm,   setPwForm]   = useState({ current:"", next:"", confirm:"" });
+  const [pwErr,    setPwErr]    = useState("");
+  const [saving,   setSaving]   = useState(false);
+  const [pwSaving, setPwSaving] = useState(false);
+  const [toast,    setToast]    = useState("");
+  const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(""), 2800); };
+
+  const startEditing  = () => { setForm({ ...user }); setEditing(true); };
+  const cancelEditing = () => { setForm({ ...user }); setEditing(false); };
+
+  const save = async () => {
+    setSaving(true);
+    const { error } = await supabase.from("users").update({
+      full_name:    form.fullName    || null,
+      username:     form.username    || null,
+      email:        form.email       || null,
+      civil_status: form.civilStatus || null,
+      birthdate:    form.birthdate   || null,
+      address:      form.address     || null,
+    }).eq("user_id", user._uuid);
+    if (error) { showToast("Error: " + error.message); setSaving(false); return; }
+    onUpdateUser({ ...user, ...form });
+    setEditing(false); setSaving(false);
+    showToast("Profile updated!");
+  };
+
+  const changePassword = async () => {
+    setPwErr("");
+    if (!pwForm.current) { setPwErr("Enter your current password."); return; }
+    if (pwForm.next.length < 6) { setPwErr("New password must be at least 6 characters."); return; }
+    if (pwForm.next !== pwForm.confirm) { setPwErr("New passwords do not match."); return; }
+    setPwSaving(true);
+    const { data: valid, error: verifyErr } = await supabase.rpc("verify_password", {
+      plain: pwForm.current, hash: user._passwordHash || "",
+    });
+    if (verifyErr || !valid) {
+      setPwErr("Current password is incorrect."); setPwSaving(false); return;
+    }
+    const { data: newHash, error: hashErr } = await supabase.rpc("hash_password", { plain: pwForm.next });
+    if (hashErr || !newHash) { setPwErr("Error hashing password."); setPwSaving(false); return; }
+    const { error: updErr } = await supabase.from("users")
+      .update({ password_hash: newHash }).eq("user_id", user._uuid);
+    if (updErr) { setPwErr("Error saving: " + updErr.message); setPwSaving(false); return; }
+    setPwForm({ current:"", next:"", confirm:"" });
+    setPwSaving(false);
+    showToast("Password changed successfully!");
+  };
+
+  const fieldVal = (f, type) => editing
+    ? <Input type={type} value={form[f]||""} onChange={e=>setForm(p=>({...p,[f]:e.target.value}))} />
+    : <div style={{ padding:"8px 10px", background:"#f8fafc", borderRadius:6, border:"1px solid #e2e8f0", fontSize:13, color:"#334155", minHeight:35 }}>{user[f]||<span style={{color:"#94a3b8"}}>—</span>}</div>;
+
+  return (
+    <div style={{ display:"flex", flexDirection:"column", height:"100%" }}>
+      <TopBar title="My Profile" subtitle="Teacher · Account Settings"
+        actions={editing
+          ? <div style={{display:"flex",gap:8}}>
+              <Btn variant="secondary" onClick={cancelEditing} disabled={saving}>✕ Cancel</Btn>
+              <Btn variant="success"   onClick={save}          disabled={saving}>{saving?"⏳ Saving…":"✓ Save Changes"}</Btn>
+            </div>
+          : <Btn variant="secondary" onClick={startEditing}>✏ Edit Profile</Btn>}
+      />
+      <div style={{ flex:1, padding:"20px 22px", overflowY:"auto", display:"flex", gap:18 }}>
+        {/* Sidebar */}
+        <div style={{ width:210, flexShrink:0, display:"flex", flexDirection:"column", gap:12 }}>
+          <Card style={{ textAlign:"center", padding:"22px 16px" }}>
+            <div style={{ width:64, height:64, borderRadius:"50%", background:"#ede9fe", border:"3px solid #6366f1", display:"flex", alignItems:"center", justifyContent:"center", margin:"0 auto 10px", fontSize:26, fontWeight:900, color:"#4f46e5" }}>{user.fullName?.charAt(0)}</div>
+            <div style={{ fontWeight:800, fontSize:14, color:"#1e293b", marginBottom:4 }}>{user.fullName}</div>
+            <Badge color="info">Teacher</Badge>
+            <div style={{ marginTop:10, fontSize:11, color:"#94a3b8" }}>{user.id}</div>
+          </Card>
+          {user.department && (
+            <Card>
+              <div style={{ fontSize:11, fontWeight:800, color:"#0f172a", marginBottom:8 }}>Department Info</div>
+              {[["Department",user.department],["Specialisation",user.specialisation],["Employee No.",user.employeeNumber]].map(([l,v])=>v&&(
+                <div key={l} style={{ marginBottom:8 }}>
+                  <div style={{ fontSize:9, fontWeight:700, color:"#94a3b8", textTransform:"uppercase", letterSpacing:"0.07em" }}>{l}</div>
+                  <div style={{ fontSize:12, color:"#334155", marginTop:2 }}>{v}</div>
+                </div>
+              ))}
+            </Card>
+          )}
+          {toast && <Toast msg={toast} />}
+        </div>
+
+        {/* Main content */}
+        <div style={{ flex:1, display:"flex", flexDirection:"column", gap:14 }}>
+          {/* Personal Info */}
+          <Card>
+            <div style={{ fontWeight:800, fontSize:14, color:"#0f172a", marginBottom:16 }}>Personal Information</div>
+            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:14 }}>
+              <FF label="Full Name">{fieldVal("fullName")}</FF>
+              <FF label="Username">{fieldVal("username")}</FF>
+              <FF label="Email">{fieldVal("email")}</FF>
+              <FF label="Civil Status">
+                {editing
+                  ? <Sel value={form.civilStatus||""} onChange={e=>setForm(p=>({...p,civilStatus:e.target.value}))}>
+                      {["Single","Married","Divorced","Widowed"].map(s=><option key={s}>{s}</option>)}
+                    </Sel>
+                  : <div style={{ padding:"8px 10px", background:"#f8fafc", borderRadius:6, border:"1px solid #e2e8f0", fontSize:13, color:"#334155", minHeight:35 }}>{user.civilStatus||<span style={{color:"#94a3b8"}}>—</span>}</div>}
+              </FF>
+              <FF label="Birthdate">{fieldVal("birthdate","date")}</FF>
+            </div>
+            <div style={{ marginTop:14 }}>
+              <FF label="Address">
+                {editing
+                  ? <Input value={form.address||""} onChange={e=>setForm(p=>({...p,address:e.target.value}))} placeholder="e.g. 123 Main St, City" />
+                  : <div style={{ padding:"8px 10px", background:"#f8fafc", borderRadius:6, border:"1px solid #e2e8f0", fontSize:13, color:"#334155", minHeight:35 }}>{user.address||<span style={{color:"#94a3b8"}}>—</span>}</div>}
+              </FF>
+            </div>
+          </Card>
+
+          {/* Change Password */}
+          <Card>
+            <div style={{ fontWeight:800, fontSize:14, color:"#0f172a", marginBottom:4 }}>🔒 Change Password</div>
+            <div style={{ fontSize:12, color:"#64748b", marginBottom:14 }}>Leave blank to keep your current password.</div>
+            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:12 }}>
+              <FF label="Current Password">
+                <Input type="password" value={pwForm.current} onChange={e=>setPwForm(p=>({...p,current:e.target.value}))} placeholder="Current password" />
+              </FF>
+              <FF label="New Password">
+                <Input type="password" value={pwForm.next} onChange={e=>setPwForm(p=>({...p,next:e.target.value}))} placeholder="Min. 6 characters" />
+              </FF>
+              <FF label="Confirm New Password">
+                <Input type="password" value={pwForm.confirm} onChange={e=>setPwForm(p=>({...p,confirm:e.target.value}))} placeholder="Repeat new password" />
+              </FF>
+            </div>
+            {pwErr && <div style={{ marginTop:8, fontSize:12, color:"#dc2626", fontWeight:700 }}>⚠ {pwErr}</div>}
+            <div style={{ marginTop:12 }}>
+              <Btn onClick={changePassword} disabled={pwSaving} variant="secondary">
+                {pwSaving ? "⏳ Saving…" : "🔒 Update Password"}
+              </Btn>
+            </div>
+          </Card>
+        </div>
       </div>
     </div>
   );
@@ -2981,7 +3439,7 @@ function StudentGrades({ user, courses, examSubmissions, enrollments }) {
   );
 }
 
-function StudentDashboard({ user, onLogout, courses, examSubmissions, onSubmitExam, enrollments }) {
+function StudentDashboard({ user, onLogout, onUpdateUser, courses, examSubmissions, onSubmitExam, enrollments }) {
   const myEnrollments = enrollments.filter(e => e.studentId===user.id);
   const [page, setPage] = useState("courses");
   const nav = [
@@ -2991,7 +3449,7 @@ function StudentDashboard({ user, onLogout, courses, examSubmissions, onSubmitEx
   ];
   const pages = {
     courses: <StudentCourses user={user} courses={courses} onSubmitExam={onSubmitExam} examSubmissions={examSubmissions} enrollments={enrollments} />,
-    profile: <StudentProfile user={user} />,
+    profile: <StudentProfile user={user} onUpdateUser={onUpdateUser} />,
     grades:  <StudentGrades  user={user} courses={courses} examSubmissions={examSubmissions} enrollments={enrollments} />,
   };
   return (
@@ -4129,18 +4587,27 @@ function TeacherAssignmentDetailView({ material, courseId, allUsers, user, onUpd
   const [editMode,    setEditMode]    = useState(false);
   const [editTitle,   setEditTitle]   = useState(material.title);
   const [editContent, setEditContent] = useState(material.content || "");
-  const [editDue,     setEditDue]     = useState(material.dueDate || "");
+  const [editDue,     setEditDue]     = useState(material.dueDate ? material.dueDate.slice(0, 16) : "");
   const [editPoints,  setEditPoints]  = useState(material.points || "");
   const [uploadedFile, setUploadedFile] = useState(null);
+  const [saving,      setSaving]      = useState(false);
   const [toast,       setToast]       = useState("");
   const fileRef = useRef(null);
 
   const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(""), 2500); };
 
+  // Sync local edit-state whenever the material prop changes (e.g. after a save)
+  useEffect(() => {
+    setEditTitle(material.title);
+    setEditContent(material.content || "");
+    setEditDue(material.dueDate ? material.dueDate.slice(0, 16) : "");
+    setEditPoints(material.points || "");
+    setUploadedFile(null);
+  }, [material.id, material.attachment_url]);
+
   // Stage the file — actual bytes uploaded in saveChanges()
   const [pendingAttachment, setPendingAttachment] = useState(null);
 
-  // Real file upload — stages the File object; bytes are sent on Save
   const handleFileUpload = (file) => {
     if (!file) return;
     setPendingAttachment(file);
@@ -4149,10 +4616,11 @@ function TeacherAssignmentDetailView({ material, courseId, allUsers, user, onUpd
   };
 
   const saveChanges = async () => {
+    setSaving(true);
+    // Use attachment_name (snake_case) — that is how normalizeMaterial stores it
     let attachmentUrl  = material.attachment_url  || null;
-    let attachmentName = material.attachmentName  || null;
+    let attachmentName = material.attachment_name || null;
 
-    // ── Upload to Supabase Storage if a new file was staged ────────────────────
     if (pendingAttachment instanceof File) {
       const storagePath = `${material.id}/${Date.now()}_${safeFileName(pendingAttachment.name)}`;
       try {
@@ -4161,16 +4629,25 @@ function TeacherAssignmentDetailView({ material, courseId, allUsers, user, onUpd
         attachmentName = pendingAttachment.name;
       } catch (err) {
         showToast("Upload failed: " + err.message);
+        setSaving(false);
         return;
       }
       setPendingAttachment(null);
-    } else if (uploadedFile) {
-      attachmentName = uploadedFile.name;
     }
 
-    onUpdate({ ...material, title:editTitle, content:editContent, dueDate:editDue,
-      points:Number(editPoints)||material.points, attachmentName, attachment_url: attachmentUrl });
-    setEditMode(false); showToast("Assignment updated!");
+    await onUpdate({
+      ...material,
+      title:           editTitle,
+      content:         editContent,
+      dueDate:         editDue,
+      points:          Number(editPoints) || material.points,
+      attachment_name: attachmentName,
+      attachmentName:  attachmentName,
+      attachment_url:  attachmentUrl,
+    });
+    setSaving(false);
+    setEditMode(false);
+    showToast("Assignment updated!");
   };
 
   const m = MAT_META[material.type] || MAT_META[MaterialType.ASSIGNMENT];
@@ -4193,10 +4670,10 @@ function TeacherAssignmentDetailView({ material, courseId, allUsers, user, onUpd
           {/* Edit toggle */}
           <div style={{ display:"flex", gap:6, alignItems:"center", flexShrink:0 }}>
             {toast && <span style={{ fontSize:11, fontWeight:700, color:"#065f46", background:"#d1fae5", padding:"3px 8px", borderRadius:5 }}>✓ {toast}</span>}
-            <Btn variant={editMode?"danger":"secondary"} size="sm" onClick={()=>{setEditMode(e=>!e);setToast("");}}>
+            <Btn variant={editMode?"danger":"secondary"} size="sm" onClick={()=>{ if(!saving){setEditMode(e=>!e);setToast("");} }}>
               {editMode ? "✕ Cancel" : "✏ Edit"}
             </Btn>
-            {editMode && <Btn size="sm" onClick={saveChanges}>💾 Save</Btn>}
+            {editMode && <Btn size="sm" onClick={saveChanges} disabled={saving}>{saving ? "⏳ Saving…" : "💾 Save"}</Btn>}
           </div>
         </div>
       </div>
@@ -4230,7 +4707,12 @@ function TeacherAssignmentDetailView({ material, courseId, allUsers, user, onUpd
                   <input ref={fileRef} type="file" accept=".pdf,.doc,.docx" style={{ display:"none" }}
                     onChange={e => handleFileUpload(e.target.files?.[0])} />
                   <Btn variant="secondary" size="sm" onClick={()=>fileRef.current?.click()}>📎 Attach File</Btn>
-                  {uploadedFile && <span style={{ fontSize:12, color:"#065f46", fontWeight:600 }}>✓ {uploadedFile.name}</span>}
+                  {uploadedFile
+                    ? <span style={{ fontSize:12, color:"#065f46", fontWeight:600 }}>✓ {uploadedFile.name}</span>
+                    : material.attachment_name
+                      ? <span style={{ fontSize:12, color:"#64748b" }}>Current: <strong style={{ color:"#0369a1" }}>{material.attachment_name}</strong></span>
+                      : <span style={{ fontSize:12, color:"#94a3b8", fontStyle:"italic" }}>No attachment yet</span>
+                  }
                 </div>
               </div>
             </div>
@@ -4242,6 +4724,25 @@ function TeacherAssignmentDetailView({ material, courseId, allUsers, user, onUpd
                   : <p style={{ color:"#94a3b8", fontStyle:"italic" }}>No instructions yet. Click "Edit" to add content.</p>
                 }
               </div>
+              {/* Attachment download — mirrors student AssignmentView */}
+              {(material.attachment_url || material.attachment_name) && (
+                <div style={{ marginTop:18, padding:"11px 14px", background:"#f0f9ff", border:"1px solid #bae6fd", borderRadius:8, display:"flex", alignItems:"center", gap:10 }}>
+                  <span style={{ fontSize:18 }}>{fileIcon(material.attachment_name)}</span>
+                  <div style={{ flex:1, minWidth:0 }}>
+                    <div style={{ fontSize:12, fontWeight:700, color:"#0369a1", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>
+                      {material.attachment_name || "Attachment"}
+                    </div>
+                    <div style={{ fontSize:10, color:"#64748b" }}>Attached file</div>
+                  </div>
+                  {material.attachment_url
+                    ? <Btn variant="ghost" size="sm" style={{ border:"1px solid #7dd3fc" }}
+                        onClick={() => window.open(material.attachment_url, "_blank", "noopener,noreferrer")}>
+                        ⬇ Download
+                      </Btn>
+                    : <span style={{ fontSize:11, color:"#94a3b8", fontStyle:"italic" }}>Staged — not yet saved</span>
+                  }
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -4314,7 +4815,7 @@ function TeacherMaterialDetailView({ material, course, allUsers, user, onBack, o
 }
 
 // ── TeacherCourses ────────────────────────────────────────────────────────────
-function TeacherCourses({ user, courses, allUsers, enrollments }) {
+function TeacherCourses({ user, courses, setCourses, allUsers, enrollments }) {
   const myCourses = courses.filter(c => c.teacher === user.id);
 
   // Course list state
@@ -4438,6 +4939,20 @@ function TeacherCourses({ user, courses, allUsers, enrollments }) {
     showToast("Exam created!");
   };
 
+  // Toggle course status between Ongoing and Finished
+  const toggleCourseStatus = async (course) => {
+    const newStatus = (course.status === "Finished") ? "Ongoing" : "Finished";
+    const { error } = await supabase
+      .from("courses")
+      .update({ status: newStatus })
+      .eq("course_id", course._uuid);
+    if (error) { showToast("Error updating status: " + error.message); return; }
+    // Update both the grid rows (via setCourses) and the open sidebar (via setSel)
+    setCourses(prev => prev.map(c => c._uuid === course._uuid ? { ...c, status: newStatus } : c));
+    setSel(prev => prev?._uuid === course._uuid ? { ...prev, status: newStatus } : prev);
+    showToast(`Course marked as ${newStatus}.`);
+  };
+
   // Called when teacher saves edits inside the detail view
   const handleMaterialUpdate = async (updated) => {
     // Find the real material_id UUID — normalizeMaterial stores it as `id`
@@ -4475,6 +4990,14 @@ function TeacherCourses({ user, courses, allUsers, enrollments }) {
     {field:"semester",  header:"Semester",  width:110},
     {field:"id",        header:"Students",  width:75,
       cellRenderer:(_,row)=><Badge color="info">{enrollments.filter(e=>e.courseId===row.id).length}</Badge>},
+    {field:"status",    header:"Status",    width:85,
+      cellRenderer: v => (
+        <span style={{ fontSize:10, fontWeight:700, padding:"2px 8px", borderRadius:9999,
+          background: v === "Finished" ? "#fef3c7" : "#dcfce7",
+          color:      v === "Finished" ? "#92400e" : "#166534" }}>
+          {v === "Finished" ? "✅ Finished" : "🟢 Ongoing"}
+        </span>
+      )},
   ];
 
   // ── DefaultCourseView ─────────────────────────────────────────────────────
@@ -4495,9 +5018,25 @@ function TeacherCourses({ user, courses, allUsers, enrollments }) {
           <div style={{ width:320, borderLeft:"1px solid #e2e8f0", background:"#fff", display:"flex", flexDirection:"column", overflow:"hidden", flexShrink:0 }}>
             {/* Sidebar header */}
             <div style={{ padding:"12px 14px", borderBottom:"1px solid #e2e8f0", display:"flex", justifyContent:"space-between", alignItems:"flex-start" }}>
-              <div>
+              <div style={{ flex:1, minWidth:0 }}>
                 <div style={{ fontWeight:800, fontSize:13, color:"#0f172a" }}>{sel.code}: {sel.name}</div>
                 <div style={{ fontSize:11, color:"#64748b", marginTop:2 }}>{sel.schedule}</div>
+                {/* Course status badge + toggle */}
+                <div style={{ display:"flex", alignItems:"center", gap:6, marginTop:7 }}>
+                  <span style={{ fontSize:10, fontWeight:700, padding:"2px 8px", borderRadius:9999,
+                    background: sel.status === "Finished" ? "#fef3c7" : "#dcfce7",
+                    color:      sel.status === "Finished" ? "#92400e" : "#166534" }}>
+                    {sel.status === "Finished" ? "✅ Finished" : "🟢 Ongoing"}
+                  </span>
+                  <button
+                    onClick={() => toggleCourseStatus(sel)}
+                    style={{ fontSize:10, fontWeight:700, padding:"2px 9px", borderRadius:9999, border:"1px solid #e2e8f0",
+                      background: sel.status === "Finished" ? "#dcfce7" : "#fef3c7",
+                      color:      sel.status === "Finished" ? "#166534" : "#92400e",
+                      cursor:"pointer", fontFamily:"inherit" }}>
+                    {sel.status === "Finished" ? "↩ Mark Ongoing" : "✓ Mark as Finished"}
+                  </button>
+                </div>
               </div>
               <button onClick={()=>setSel(null)} style={{ border:"none", background:"none", cursor:"pointer", color:"#94a3b8", fontSize:18, marginLeft:8 }}>×</button>
             </div>
@@ -5195,15 +5734,17 @@ function TeacherGrades({ user, courses, allUsers, examSubmissions, enrollments }
     </div>
   );
 }
-function TeacherDashboard({ user, onLogout, courses, allUsers, examSubmissions, enrollments }) {
+function TeacherDashboard({ user, onLogout, onUpdateUser, courses, setCourses, allUsers, examSubmissions, enrollments }) {
   const myCourses = courses.filter(c => c.teacher===user.id);
   const [page, setPage] = useState("courses");
   const nav = [
     { id:"courses", label:"My Courses",    icon:"📚", badge:myCourses.length },
+    { id:"profile", label:"My Profile",    icon:"👤", badge:null },
     { id:"grades",  label:"Grade Students",icon:"📝", badge:null },
   ];
   const pages = {
-    courses: <TeacherCourses user={user} courses={courses} allUsers={allUsers} enrollments={enrollments} />,
+    courses: <TeacherCourses user={user} courses={courses} setCourses={setCourses} allUsers={allUsers} enrollments={enrollments} />,
+    profile: <TeacherProfile user={user} onUpdateUser={onUpdateUser} />,
     grades:  <TeacherGrades  user={user} courses={courses} allUsers={allUsers} examSubmissions={examSubmissions} enrollments={enrollments} />,
   };
   return (
@@ -5271,19 +5812,23 @@ export default function App() {
 
       setCourses(courses.map(c => {
         const tca = tcas.find(t => t.course_id === c.course_id);
-        const sch = schedules.find(s => s.schedule_id === tca?.schedule_id);
+        // Look up schedule directly by course_id — do NOT go through tca.schedule_id,
+        // because most seeded TCA rows have schedule_id = null even when a schedule row exists.
+        const sch = schedules.find(s => s.course_id === c.course_id);
         const teacher = tca ? teacherMap[tca.teacher_id] : null;
         return {
-          id:          c.course_code,
-          code:        c.course_code,
-          name:        c.course_name,
-          teacher:     teacher?.display_id   || "",
-          teacherName: teacher?.full_name    || "Unassigned",
-          schedule:    sch?.schedule_label   || "",
-          units:       c.units,
-          yearLevel:   sch?.year_level       || "",
-          semester:    sch?.semester         || "",
-          _uuid:       c.course_id,
+          id:           c.course_code,
+          code:         c.course_code,
+          name:         c.course_name,
+          teacher:      teacher?.display_id   || "",
+          teacherName:  teacher?.full_name    || "Unassigned",
+          schedule:     sch?.schedule_label   || "",
+          units:        c.units,
+          yearLevel:    sch?.year_level       || "",
+          semester:     sch?.semester         || "",
+          status:       c.status              || "Ongoing",
+          _uuid:        c.course_id,
+          _scheduleId:  sch?.schedule_id      || null,
         };
       }));
     }
@@ -5419,8 +5964,8 @@ export default function App() {
         : currentUser.role==="admin"
           ? <AdminDashboard   user={currentUser} onLogout={()=>setCurrentUser(null)} users={users} setUsers={setUsers} courses={courses} setCourses={setCourses} enrollments={enrollments} setEnrollments={setEnrollments} />
           : currentUser.role==="student"
-          ? <StudentDashboard user={currentUser} onLogout={()=>setCurrentUser(null)} courses={courses} examSubmissions={examSubmissions} onSubmitExam={handleSubmitExam} enrollments={enrollments} />
-          : <TeacherDashboard user={currentUser} onLogout={()=>setCurrentUser(null)} courses={courses} allUsers={users} examSubmissions={examSubmissions} enrollments={enrollments} />
+          ? <StudentDashboard user={currentUser} onLogout={()=>setCurrentUser(null)} onUpdateUser={setCurrentUser} courses={courses} examSubmissions={examSubmissions} onSubmitExam={handleSubmitExam} enrollments={enrollments} />
+          : <TeacherDashboard user={currentUser} onLogout={()=>setCurrentUser(null)} onUpdateUser={setCurrentUser} courses={courses} setCourses={setCourses} allUsers={users} examSubmissions={examSubmissions} enrollments={enrollments} />
       }
     </>
   );

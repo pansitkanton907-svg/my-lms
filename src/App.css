@@ -1,0 +1,395 @@
+/* ============================================================
+   App.css — EduLMS Global Stylesheet
+   Generated from lms-prototype (38).jsx → const GS
+   ============================================================ */
+
+/* ── Fonts ─────────────────────────────────────────────────── */
+@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap');
+
+
+/* ── Reset & Base ───────────────────────────────────────────── */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body,
+#root {
+  height: 100vh;
+  overflow: hidden;
+  font-family: 'Outfit', sans-serif;
+}
+
+
+/* ── Scrollbar ──────────────────────────────────────────────── */
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+
+::-webkit-scrollbar-track {
+  background: #f1f5f9;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+input[type=number]::-webkit-inner-spin-button {
+  opacity: 1;
+}
+
+
+/* ── Material Detail — Slide & Fade Transitions ─────────────── */
+@keyframes matSlideIn {
+  from { transform: translateX(32px); opacity: 0; }
+  to   { transform: translateX(0);    opacity: 1; }
+}
+
+@keyframes matFadeUp {
+  from { transform: translateY(10px); opacity: 0; }
+  to   { transform: translateY(0);    opacity: 1; }
+}
+
+.mat-detail-enter { animation: matSlideIn 0.28s cubic-bezier(0.22, 1, 0.36, 1) both; }
+.mat-fade-up      { animation: matFadeUp  0.22s cubic-bezier(0.22, 1, 0.36, 1) both; }
+
+
+/* ── Markdown Body ──────────────────────────────────────────── */
+.md-body {
+  line-height: 1.75;
+  color: #334155;
+}
+
+.md-body h2 {
+  font-size: 16px;
+  font-weight: 800;
+  color: #0f172a;
+  margin: 18px 0 7px;
+  letter-spacing: -0.02em;
+}
+
+.md-body p {
+  margin: 0 0 11px;
+  font-size: 13.5px;
+}
+
+.md-body ul,
+.md-body ol {
+  margin: 0 0 11px 20px;
+  font-size: 13.5px;
+}
+
+.md-body li {
+  margin-bottom: 4px;
+}
+
+.md-body code {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  background: #f1f5f9;
+  padding: 1px 5px;
+  border-radius: 4px;
+  color: #6366f1;
+}
+
+.md-body pre {
+  background: #0f172a;
+  border-radius: 8px;
+  padding: 13px 16px;
+  margin: 0 0 13px;
+  overflow-x: auto;
+}
+
+.md-body pre code {
+  background: none;
+  color: #a5f3fc;
+  padding: 0;
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.md-body table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0 0 13px;
+  font-size: 12.5px;
+}
+
+.md-body th {
+  background: #1e293b;
+  color: #94a3b8;
+  padding: 7px 11px;
+  text-align: left;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+}
+
+.md-body td {
+  padding: 7px 11px;
+  border-bottom: 1px solid #f1f5f9;
+  color: #334155;
+}
+
+.md-body tr:last-child td {
+  border-bottom: none;
+}
+
+.md-body strong {
+  font-weight: 700;
+  color: #1e293b;
+}
+
+
+/* ── Drop Zone ──────────────────────────────────────────────── */
+.dropzone {
+  border: 2px dashed #c7d2fe;
+  border-radius: 10px;
+  transition: all .2s;
+  background: #f8f9ff;
+  cursor: pointer;
+}
+
+.dropzone:hover,
+.dropzone.drag-over {
+  border-color: #4f46e5;
+  background: #eff2ff;
+}
+
+
+/* ── Sidebar Material Item ──────────────────────────────────── */
+.mat-item:hover {
+  background: rgba(99, 102, 241, .07) !important;
+}
+
+
+/* ── Exam Builder ───────────────────────────────────────────── */
+@keyframes builderIn {
+  from { opacity: 0; transform: translateY(14px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.exam-builder-enter {
+  animation: builderIn 0.25s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* Question card */
+.q-card {
+  border: 1.5px solid #e2e8f0;
+  border-radius: 10px;
+  background: #fff;
+  transition: border-color .15s, box-shadow .15s;
+}
+
+.q-card:hover   { border-color: #c7d2fe; }
+.q-card.active  { border-color: #6366f1; box-shadow: 0 0 0 3px rgba(99, 102, 241, .10); }
+.q-card.preview { border-color: #e2e8f0; pointer-events: none; }
+
+/* MCQ option row */
+.mcq-option {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 8px 11px;
+  border-radius: 7px;
+  border: 1.5px solid #e2e8f0;
+  cursor: pointer;
+  transition: all .12s;
+}
+
+.mcq-option:hover   { border-color: #a5b4fc; background: #f5f3ff; }
+.mcq-option.correct { border-color: #10b981; background: #f0fdf4; }
+
+/* True / False toggle */
+.tf-btn {
+  flex: 1;
+  padding: 10px;
+  border: 1.5px solid #e2e8f0;
+  border-radius: 8px;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all .15s;
+  background: #fff;
+}
+
+.tf-btn.selected-true  { border-color: #10b981; background: #f0fdf4; color: #065f46; }
+.tf-btn.selected-false { border-color: #ef4444; background: #fef2f2; color: #991b1b; }
+
+/* Question type selector dropdown */
+.qtype-menu {
+  position: absolute;
+  top: calc(100% + 5px);
+  right: 0;
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 9px;
+  padding: 5px;
+  z-index: 20;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, .12);
+  min-width: 180px;
+}
+
+.qtype-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  color: #334155;
+  transition: background .1s;
+}
+
+.qtype-item:hover {
+  background: #f1f5f9;
+}
+
+/* Validation error banner */
+.val-error {
+  background: #fee2e2;
+  border: 1px solid #fecaca;
+  border-radius: 7px;
+  padding: 9px 13px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #dc2626;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+
+/* ── Exam Taker ─────────────────────────────────────────────── */
+@keyframes examIn {
+  from { opacity: 0; transform: translateY(18px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.exam-enter {
+  animation: examIn 0.3s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* Answer option rows (student-facing) */
+.ans-opt {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: 9px;
+  border: 1.5px solid #e2e8f0;
+  cursor: pointer;
+  transition: all .15s;
+  background: #fff;
+}
+
+.ans-opt:hover          { border-color: #a5b4fc; background: #f5f3ff; }
+.ans-opt.selected       { border-color: #4f46e5; background: #eff2ff; }
+.ans-opt.correct-reveal { border-color: #10b981; background: #f0fdf4; }
+.ans-opt.wrong-reveal   { border-color: #ef4444; background: #fef2f2; }
+
+/* Countdown timer */
+.exam-timer {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 20px;
+  font-weight: 900;
+  letter-spacing: .04em;
+}
+
+.exam-timer.urgent {
+  color: #ef4444;
+  animation: timerPulse 1s infinite;
+}
+
+@keyframes timerPulse {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: .5; }
+}
+
+/* Results summary progress bar */
+.result-bar-wrap {
+  height: 8px;
+  background: #f1f5f9;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.result-bar {
+  height: 100%;
+  border-radius: 4px;
+  transition: width .6s cubic-bezier(.22, 1, .36, 1);
+}
+
+
+/* ── Grade Table Cell Colours ───────────────────────────────── */
+.grade-cell-pass { background: #f0fdf4 !important; color: #065f46 !important; font-weight: 800; }
+.grade-cell-warn { background: #fffbeb !important; color: #92400e !important; font-weight: 800; }
+.grade-cell-fail { background: #fef2f2 !important; color: #dc2626 !important; font-weight: 800; }
+.grade-cell-high { background: #ede9fe !important; color: #4f46e5 !important; font-weight: 900; }
+
+/* Drill-down row */
+.drill-row td             { background: #f8fafc !important; }
+.drill-row:hover td       { background: #f0f9ff !important; }
+
+
+/* ── Grading Modal Overlay ──────────────────────────────────── */
+@keyframes modalIn {
+  from { opacity: 0; transform: scale(0.96) translateY(8px); }
+  to   { opacity: 1; transform: scale(1)    translateY(0);   }
+}
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  background: rgba(15, 23, 42, .55);
+  backdrop-filter: blur(3px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.modal-box {
+  animation: modalIn 0.22s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+
+/* ── Teacher — Submission Row ───────────────────────────────── */
+.sub-row:hover td {
+  background: #f0f9ff !important;
+}
+
+
+/* ── Edit Mode Textarea ─────────────────────────────────────── */
+.edit-textarea {
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: 13px;
+  font-family: inherit;
+  resize: vertical;
+  outline: none;
+  width: 100%;
+  color: #1e293b;
+  background: #fff;
+  min-height: 80px;
+}
+
+.edit-textarea:focus {
+  border-color: #6366f1;
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, .12);
+}
