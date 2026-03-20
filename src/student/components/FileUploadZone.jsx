@@ -32,7 +32,7 @@ export default function FileUploadZone({ onFile }) {
           ? <><div style={{ fontSize: 30, marginBottom: 6 }}>⬇</div><div style={{ fontSize: 13, fontWeight: 700, color: "#4f46e5" }}>Drop your file here</div></>
           : <>
               <div style={{ fontSize: 28, marginBottom: 6 }}>☁</div>
-              <div style={{ fontSize: 13, fontWeight: 700, color: "#1e293b", marginBottom: 3 }}>Drag & drop your file</div>
+              <div style={{ fontSize: 13, fontWeight: 700, color: "#e2e8f0", marginBottom: 3 }}>Drag & drop your file</div>
               <div style={{ fontSize: 12, color: "#64748b" }}>or <span style={{ color: "#4f46e5", fontWeight: 700 }}>click to browse</span></div>
               <div style={{ fontSize: 11, color: "#94a3b8", marginTop: 6 }}>PDF, DOC, DOCX · Max 20 MB</div>
             </>

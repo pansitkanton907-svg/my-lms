@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from "react";
 import { supabase } from "../../supabaseClient";
 import { gradeColor } from "../../lib/helpers";
+import { MaterialType } from "../../lib/constants";
 import { Badge, Btn } from "../../components/ui";
 import GradingModal from "./GradingModal";
 
@@ -10,7 +11,7 @@ import GradingModal from "./GradingModal";
  * and a "View & Grade" action per row.
  * Uses Supabase Realtime to push new/updated submissions to the teacher live.
  */
-export default function TeacherGradingDashboard({ material, courseId, allUsers, user, gradeEntries, onGradeUpdate, enrollments }) {
+export default function TeacherGradingDashboard({ material, courseId, courseUuid, allUsers, user, gradeEntries, onGradeUpdate, enrollments }) {
   const [roster,      setRoster]      = useState([]);
   const [modalSub,    setModalSub]    = useState(null);
   const [savedToast,  setSavedToast]  = useState("");
@@ -108,6 +109,25 @@ export default function TeacherGradingDashboard({ material, courseId, allUsers, 
       return;
     }
 
+    // ── Auto-sync Project grade → class_standing.project ──────────────────────
+    // When a "Project" material is graded, write the score directly into
+    // class_standing so the teacher doesn't have to re-enter it manually.
+    if (material.type === MaterialType.PROJECT && g != null && courseUuid) {
+      const studentUser = allUsers.find(u => u.id === updated.studentId);
+      const studentUuid = studentUser?._uuid;
+      const term        = material.term || "Prelim";
+      if (studentUuid) {
+        await supabase.from("class_standing").upsert({
+          student_id:  studentUuid,
+          course_id:   courseUuid,
+          term,
+          project:     g,
+          updated_by:  user?._uuid ?? null,
+          updated_at:  new Date().toISOString(),
+        }, { onConflict: "student_id,course_id,term", ignoreDuplicates: false });
+      }
+    }
+
     setRoster(prev => prev.map(r =>
       r.studentId === updated.studentId
         ? { ...updated, grade: g, status: g != null ? "Graded" : updated.status }
@@ -115,7 +135,11 @@ export default function TeacherGradingDashboard({ material, courseId, allUsers, 
     ));
     onGradeUpdate({ ...updated, grade: g, status: g != null ? "Graded" : updated.status });
     setModalSub(null);
-    setSavedToast(`Grade saved for ${updated.studentName}`);
+    setSavedToast(
+      material.type === MaterialType.PROJECT && g != null
+        ? `Grade saved & synced to Class Standing for ${updated.studentName}`
+        : `Grade saved for ${updated.studentName}`
+    );
     setTimeout(() => setSavedToast(""), 2500);
   };
 
@@ -124,35 +148,40 @@ export default function TeacherGradingDashboard({ material, courseId, allUsers, 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
       {/* Section header */}
-      <div style={{ padding: "9px 15px", borderBottom: "1px solid #f1f5f9", background: "#fafafe", flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+      <div style={{ padding: "9px 15px", borderBottom: "1px solid #1e293b", background: "#0f172a", flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <span style={{ fontSize: 10, fontWeight: 800, color: "#64748b", textTransform: "uppercase", letterSpacing: "0.07em" }}>📋 Submissions & Grading</span>
+          {material.type === MaterialType.PROJECT && (
+            <span style={{ fontSize: 9, fontWeight: 800, color: "#c084fc", background: "rgba(192,132,252,.15)", padding: "2px 8px", borderRadius: 9999, border: "1px solid rgba(192,132,252,.3)" }}>
+              🗂 Project — grade auto-syncs to Class Standing
+            </span>
+          )}
           <span style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 10, fontWeight: 700, color: "#10b981" }}>
             <span style={{ width: 6, height: 6, borderRadius: "50%", background: "#10b981", display: "inline-block", animation: "timerPulse 2s infinite" }} />
             Live
           </span>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          {savedToast && <span style={{ fontSize: 11, fontWeight: 700, color: "#065f46", background: "#d1fae5", padding: "3px 8px", borderRadius: 5 }}>✓ {savedToast}</span>}
+          {savedToast && <span style={{ fontSize: 11, fontWeight: 700, color: "#34d399", background: "rgba(16,185,129,.15)", padding: "3px 8px", borderRadius: 5 }}>✓ {savedToast}</span>}
           {lastUpdated && <span style={{ fontSize: 10, color: "#94a3b8" }}>Updated {lastUpdated.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" })}</span>}
           <button
             onClick={() => loadRoster.current()}
             disabled={refreshing}
-            style={{ display: "flex", alignItems: "center", gap: 4, padding: "3px 9px", border: "1px solid #e2e8f0", borderRadius: 5, background: "#fff", cursor: refreshing ? "not-allowed" : "pointer", fontSize: 11, fontWeight: 700, color: "#4f46e5", fontFamily: "inherit", opacity: refreshing ? 0.6 : 1 }}>
+            style={{ display: "flex", alignItems: "center", gap: 4, padding: "3px 9px", border: "1px solid #334155", borderRadius: 5, background: "#1e293b", cursor: refreshing ? "not-allowed" : "pointer", fontSize: 11, fontWeight: 700, color: "#4f46e5", fontFamily: "inherit", opacity: refreshing ? 0.6 : 1 }}>
             {refreshing ? "⟳ Refreshing…" : "⟳ Refresh"}
           </button>
         </div>
       </div>
 
       {/* Stats strip */}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 0, borderBottom: "1px solid #f1f5f9", flexShrink: 0 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 0, borderBottom: "1px solid #1e293b", flexShrink: 0 }}>
         {[
           ["Total",     displayRoster.length,                       "#6366f1"],
           ["Submitted", submitted,                                   "#10b981"],
           ["Pending",   pending,                                     "#f59e0b"],
           ["Avg Grade", avgGrade + (avgGrade !== "—" ? "%" : ""),   "#3b82f6"],
         ].map(([lbl, val, col]) => (
-          <div key={lbl} style={{ padding: "10px 12px", borderRight: "1px solid #f1f5f9", textAlign: "center" }}>
+          <div key={lbl} style={{ padding: "10px 12px", borderRight: "1px solid #1e293b", textAlign: "center" }}>
             <div style={{ fontSize: 18, fontWeight: 900, color: col }}>{val}</div>
             <div style={{ fontSize: 10, color: "#94a3b8", marginTop: 1 }}>{lbl}</div>
           </div>
@@ -171,14 +200,14 @@ export default function TeacherGradingDashboard({ material, courseId, allUsers, 
           </thead>
           <tbody>
             {displayRoster.map((row) => (
-              <tr key={row.studentId} className="sub-row" style={{ borderBottom: "1px solid #f1f5f9" }}>
+              <tr key={row.studentId} className="sub-row" style={{ borderBottom: "1px solid #1e293b" }}>
                 <td style={{ padding: "8px 10px" }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
-                    <div style={{ width: 24, height: 24, borderRadius: "50%", background: "#ede9fe", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, fontWeight: 800, color: "#6366f1", flexShrink: 0 }}>
+                    <div style={{ width: 24, height: 24, borderRadius: "50%", background: "rgba(99,102,241,.15)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, fontWeight: 800, color: "#6366f1", flexShrink: 0 }}>
                       {row.studentName?.charAt(0)}
                     </div>
                     <div>
-                      <div style={{ fontSize: 12, fontWeight: 700, color: "#1e293b" }}>{row.studentName}</div>
+                      <div style={{ fontSize: 12, fontWeight: 700, color: "#e2e8f0" }}>{row.studentName}</div>
                       <div style={{ fontSize: 10, color: "#94a3b8" }}>{row.studentId}</div>
                     </div>
                   </div>

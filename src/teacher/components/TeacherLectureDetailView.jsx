@@ -78,7 +78,7 @@ export default function TeacherLectureDetailView({ material, onUpdate }) {
   return (
     <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
       {/* Banner */}
-      <div style={{ background: `linear-gradient(135deg,${m.light} 0%,#fff 100%)`, borderBottom: "1px solid #e2e8f0", padding: "13px 22px", flexShrink: 0 }}>
+      <div style={{ background: `linear-gradient(135deg,${m.light} 0%,#fff 100%)`, borderBottom: "1px solid #334155", padding: "13px 22px", flexShrink: 0 }}>
         <div style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
           <div style={{ width: 42, height: 42, borderRadius: 11, background: m.bg, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 21, flexShrink: 0 }}>{m.icon}</div>
           <div style={{ flex: 1, minWidth: 0 }}>
@@ -86,11 +86,11 @@ export default function TeacherLectureDetailView({ material, onUpdate }) {
               <TypeBadge type={material.type} />
               <span style={{ fontSize: 11, color: "#94a3b8" }}>{material.date}</span>
             </div>
-            <div style={{ fontSize: 17, fontWeight: 900, color: "#0f172a", letterSpacing: "-0.02em" }}>{material.title}</div>
+            <div style={{ fontSize: 17, fontWeight: 900, color: "#f1f5f9", letterSpacing: "-0.02em" }}>{material.title}</div>
             {material.description && <div style={{ fontSize: 12, color: "#64748b", marginTop: 2 }}>{material.description}</div>}
           </div>
           <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
-            {toast && <span style={{ fontSize: 11, fontWeight: 700, color: "#065f46", background: "#d1fae5", padding: "4px 9px", borderRadius: 5, alignSelf: "center" }}>✓ {toast}</span>}
+            {toast && <span style={{ fontSize: 11, fontWeight: 700, color: "#34d399", background: "rgba(16,185,129,.15)", padding: "4px 9px", borderRadius: 5, alignSelf: "center" }}>✓ {toast}</span>}
             <Btn variant={editMode ? "danger" : "secondary"} size="sm"
               onClick={() => { if (!saving) { setEditMode(e => !e); setToast(""); } }}>
               {editMode ? "✕ Cancel" : "✏ Edit Material"}
@@ -113,7 +113,7 @@ export default function TeacherLectureDetailView({ material, onUpdate }) {
             <textarea className="edit-textarea" rows={12} value={editContent} onChange={e => setEditContent(e.target.value)} placeholder="Write course content using Markdown formatting…" style={{ fontFamily: "'JetBrains Mono',monospace", fontSize: 12 }} />
           </FF>
           <div>
-            <label style={{ fontSize: 10, fontWeight: 700, color: "#475569", textTransform: "uppercase", letterSpacing: "0.06em", display: "block", marginBottom: 6 }}>
+            <label style={{ fontSize: 10, fontWeight: 700, color: "#94a3b8", textTransform: "uppercase", letterSpacing: "0.06em", display: "block", marginBottom: 6 }}>
               Replace Attachment (PDF / DOCX)
             </label>
             <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
@@ -121,7 +121,7 @@ export default function TeacherLectureDetailView({ material, onUpdate }) {
                 onChange={e => handleFileUpload(e.target.files?.[0])} />
               <Btn variant="secondary" size="sm" onClick={() => fileRef.current?.click()}>📎 Choose File</Btn>
               {uploadedFile
-                ? <span style={{ fontSize: 12, color: "#065f46", fontWeight: 600 }}>✓ {uploadedFile.name}</span>
+                ? <span style={{ fontSize: 12, color: "#34d399", fontWeight: 600 }}>✓ {uploadedFile.name}</span>
                 : material.attachment_name
                   ? <span style={{ fontSize: 12, color: "#64748b" }}>Current: <strong style={{ color: "#0369a1" }}>{material.attachment_name}</strong></span>
                   : <span style={{ fontSize: 12, color: "#94a3b8", fontStyle: "italic" }}>No attachment yet</span>
@@ -139,7 +139,7 @@ export default function TeacherLectureDetailView({ material, onUpdate }) {
             }
           </div>
           {(material.attachment_url || material.attachment_name) && (
-            <div style={{ marginTop: 18, padding: "11px 14px", background: "#f0f9ff", border: "1px solid #bae6fd", borderRadius: 8, display: "flex", alignItems: "center", gap: 10 }}>
+            <div style={{ marginTop: 18, padding: "11px 14px", background: "#1a2a3a", border: "1px solid #bae6fd", borderRadius: 8, display: "flex", alignItems: "center", gap: 10 }}>
               <span style={{ fontSize: 18 }}>{fileIcon(material.attachment_name)}</span>
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ fontSize: 12, fontWeight: 700, color: "#0369a1", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{material.attachment_name || "Attachment"}</div>

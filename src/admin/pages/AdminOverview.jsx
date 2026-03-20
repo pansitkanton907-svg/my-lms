@@ -22,7 +22,7 @@ export default function AdminOverview({ users, courses, enrollments }) {
         {/* Two-column quick-look grids */}
         <div style={{ flex: 1, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, overflow: "hidden" }}>
           <Card style={{ display: "flex", flexDirection: "column", overflow: "hidden" }}>
-            <div style={{ fontWeight: 800, fontSize: 14, color: "#0f172a", marginBottom: 10 }}>Students</div>
+            <div style={{ fontWeight: 800, fontSize: 14, color: "#f1f5f9", marginBottom: 10 }}>Students</div>
             <div style={{ flex: 1, overflow: "hidden" }}>
               <LMSGrid
                 columns={[
@@ -39,7 +39,7 @@ export default function AdminOverview({ users, courses, enrollments }) {
           </Card>
 
           <Card style={{ display: "flex", flexDirection: "column", overflow: "hidden" }}>
-            <div style={{ fontWeight: 800, fontSize: 14, color: "#0f172a", marginBottom: 10 }}>Courses</div>
+            <div style={{ fontWeight: 800, fontSize: 14, color: "#f1f5f9", marginBottom: 10 }}>Courses</div>
             <div style={{ flex: 1, overflow: "hidden" }}>
               <LMSGrid
                 columns={[

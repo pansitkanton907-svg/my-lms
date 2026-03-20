@@ -11,7 +11,7 @@ export default function AssignmentView({ material, user, existingSubmission, onS
   return (
     <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
       {/* Banner */}
-      <div style={{ background: `linear-gradient(135deg,${m.light} 0%,#fff 100%)`, borderBottom: "1px solid #e2e8f0", padding: "12px 20px", flexShrink: 0 }}>
+      <div style={{ background: `linear-gradient(135deg,${m.light} 0%,#fff 100%)`, borderBottom: "1px solid #334155", padding: "12px 20px", flexShrink: 0 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 11 }}>
           <div style={{ width: 40, height: 40, borderRadius: 10, background: m.bg, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20, flexShrink: 0 }}>
             {m.icon}
@@ -22,7 +22,7 @@ export default function AssignmentView({ material, user, existingSubmission, onS
               <span style={{ fontSize: 11, color: "#94a3b8" }}>{material.date}</span>
               {material.points && <span style={{ fontSize: 11, fontWeight: 800, color: m.color }}>· {material.points} pts</span>}
             </div>
-            <div style={{ fontSize: 17, fontWeight: 900, color: "#0f172a", letterSpacing: "-0.02em" }}>{material.title}</div>
+            <div style={{ fontSize: 17, fontWeight: 900, color: "#f1f5f9", letterSpacing: "-0.02em" }}>{material.title}</div>
           </div>
         </div>
       </div>
@@ -30,8 +30,8 @@ export default function AssignmentView({ material, user, existingSubmission, onS
       {/* Dual pane */}
       <div style={{ flex: 1, display: "flex", overflow: "hidden" }}>
         {/* LEFT — instructions */}
-        <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", borderRight: "1px solid #e2e8f0" }}>
-          <div style={{ padding: "8px 18px", borderBottom: "1px solid #f1f5f9", background: "#fafafa", flexShrink: 0 }}>
+        <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", borderRight: "1px solid #334155" }}>
+          <div style={{ padding: "8px 18px", borderBottom: "1px solid #1e293b", background: "#0f172a", flexShrink: 0 }}>
             <span style={{ fontSize: 10, fontWeight: 800, color: "#64748b", textTransform: "uppercase", letterSpacing: "0.07em" }}>📋 Instructions & Objectives</span>
           </div>
           <div style={{ flex: 1, overflowY: "auto", padding: "16px 20px 22px" }}>
@@ -43,7 +43,7 @@ export default function AssignmentView({ material, user, existingSubmission, onS
             </div>
             {/* Teacher attachment download */}
             {material.attachment_url && (
-              <div style={{ marginTop: 14, padding: "10px 13px", background: "#f0f9ff", border: "1px solid #bae6fd", borderRadius: 8, display: "flex", alignItems: "center", gap: 9 }}>
+              <div style={{ marginTop: 14, padding: "10px 13px", background: "#1a2a3a", border: "1px solid #bae6fd", borderRadius: 8, display: "flex", alignItems: "center", gap: 9 }}>
                 <span style={{ fontSize: 16 }}>{fileIcon(material.attachment_name)}</span>
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ fontSize: 11, fontWeight: 700, color: "#0369a1", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{material.attachment_name || "Attachment"}</div>
@@ -60,7 +60,7 @@ export default function AssignmentView({ material, user, existingSubmission, onS
 
         {/* RIGHT — submission portal */}
         <div style={{ width: 300, display: "flex", flexDirection: "column", overflow: "hidden", flexShrink: 0, background: "#fdfdff" }}>
-          <div style={{ padding: "8px 15px", borderBottom: "1px solid #f1f5f9", background: "#fafafe", flexShrink: 0 }}>
+          <div style={{ padding: "8px 15px", borderBottom: "1px solid #1e293b", background: "#0f172a", flexShrink: 0 }}>
             <span style={{ fontSize: 10, fontWeight: 800, color: "#64748b", textTransform: "uppercase", letterSpacing: "0.07em" }}>📤 Submission Portal</span>
           </div>
           <div style={{ flex: 1, padding: "12px 14px", overflow: "hidden" }}>

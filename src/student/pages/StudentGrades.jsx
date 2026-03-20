@@ -88,30 +88,42 @@ export default function StudentGrades({ user, courses, examSubmissions, enrollme
       const csEntry = classStandings.find(cs => cs.courseUuid === cuuid && cs.term === term) || null;
       const cs = csGradePct(csEntry);
 
-      // Exams (40%)
+      // Exams (40%) and Quizzes (30%) — separated by examType
       const termExams = allExams.filter(ex => ex.courseId === e.courseId && ex.term === term);
       const examSubs  = examSubmissions.filter(s => s.studentId === user.id && s.courseId === e.courseId);
-      const examScoresPct = termExams.map(ex => {
+
+      const examOnlyItems  = termExams.filter(ex => (ex.examType || "Exam") === "Exam");
+      const quizOnlyItems  = termExams.filter(ex => ex.examType === "Quiz");
+
+      const examScoresPct = examOnlyItems.map(ex => {
         const sub = examSubs.find(s => s.examId === ex.id);
         return sub ? Math.round((sub.score / sub.totalPoints) * 100) : null;
       }).filter(x => x != null);
+      const quizScoresPct = quizOnlyItems.map(ex => {
+        const sub = examSubs.find(s => s.examId === ex.id);
+        return sub ? Math.round((sub.score / sub.totalPoints) * 100) : null;
+      }).filter(x => x != null);
+
       const exam = examScoresPct.length > 0
-        ? Math.round(examScoresPct.reduce((a, b) => a + b, 0) / examScoresPct.length)
-        : null;
+        ? Math.round(examScoresPct.reduce((a, b) => a + b, 0) / examScoresPct.length) : null;
+      const quiz = quizScoresPct.length > 0
+        ? Math.round(quizScoresPct.reduce((a, b) => a + b, 0) / quizScoresPct.length) : null;
+
       const examDetail = termExams.map(ex => {
         const sub = examSubs.find(s => s.examId === ex.id);
         return {
-          title: ex.title,
-          score: sub?.score ?? null,
-          total: ex.totalPoints,
-          pct:   sub ? Math.round((sub.score / sub.totalPoints) * 100) : null,
+          title:    ex.title,
+          examType: ex.examType || "Exam",
+          score:    sub?.score ?? null,
+          total:    ex.totalPoints,
+          pct:      sub ? Math.round((sub.score / sub.totalPoints) * 100) : null,
         };
       });
 
       termData[term] = {
         cw, cwDetail, csEntry,
-        cs, exam, examDetail,
-        grade: computeTermGrade({ cw, cs, exam }),
+        cs, exam, quiz, examDetail,
+        grade: computeTermGrade({ cw, cs, exam, quiz }),
       };
     });
 
@@ -137,7 +149,7 @@ export default function StudentGrades({ user, courses, examSubmissions, enrollme
 
   const termGradeCell = (v) => v != null
     ? <span className={cellGradeClass(v)} style={{ display: "block", textAlign: "center", fontWeight: 800, padding: "2px 6px", borderRadius: 5 }}>{v}%</span>
-    : <span style={{ color: "#94a3b8", fontSize: 11 }}>—</span>;
+    : <span style={{ color: "#475569", fontSize: 11 }}>—</span>;
 
   const cols = [
     { field: "courseCode",  header: "Code",       width: 72 },
@@ -150,14 +162,14 @@ export default function StudentGrades({ user, courses, examSubmissions, enrollme
     { field: "overall",     header: "Overall",    width: 82,
       cellRenderer: (_, row) => row.overall != null
         ? <span className={cellGradeClass(row.overall)} style={{ display: "block", textAlign: "center", fontWeight: 900, fontSize: 14, padding: "2px 6px", borderRadius: 5 }}>{row.overall}%</span>
-        : <span style={{ color: "#94a3b8", fontSize: 11 }}>—</span> },
+        : <span style={{ color: "#475569", fontSize: 11 }}>—</span> },
     { field: "status", header: "Status", width: 82,
       cellRenderer: (v) => <Badge color={v === "Pass" ? "success" : v === "Fail" ? "danger" : "default"}>{v}</Badge> },
     { field: "courseId", header: "Detail", width: 72, sortable: false,
       cellRenderer: (_, row) => (
         <button
           onClick={e => { e.stopPropagation(); setExpandedId(id => id === row.courseId ? null : row.courseId); }}
-          style={{ background: "none", border: "1px solid #e2e8f0", borderRadius: 5, padding: "3px 9px", cursor: "pointer", fontSize: 11, fontWeight: 700, color: "#4f46e5", fontFamily: "inherit" }}>
+          style={{ background: "none", border: "1px solid #334155", borderRadius: 5, padding: "3px 9px", cursor: "pointer", fontSize: 11, fontWeight: 700, color: "#4f46e5", fontFamily: "inherit" }}>
           {expandedId === row.courseId ? "▲ Hide" : "▼ Details"}
         </button>
       )},
@@ -179,7 +191,7 @@ export default function StudentGrades({ user, courses, examSubmissions, enrollme
         </div>
 
         {/* Grade table */}
-        <div style={{ flex: 1, overflow: "hidden", border: "1px solid #e2e8f0", borderRadius: 8, background: "#fff", display: "flex", flexDirection: "column" }}>
+        <div style={{ flex: 1, overflow: "hidden", border: "1px solid #334155", borderRadius: 8, background: "#1e293b", display: "flex", flexDirection: "column" }}>
           {/* Sticky header */}
           <div style={{ flexShrink: 0 }}>
             <table style={{ width: "100%", borderCollapse: "collapse" }}>
@@ -187,7 +199,7 @@ export default function StudentGrades({ user, courses, examSubmissions, enrollme
                 <tr style={{ background: "#1e293b" }}>
                   {cols.map(col => (
                     <th key={col.field + col.header}
-                      style={{ padding: "9px 12px", textAlign: "left", fontWeight: 700, fontSize: 10, letterSpacing: "0.07em", textTransform: "uppercase", color: "#94a3b8", whiteSpace: "nowrap", width: col.width || "auto" }}>
+                      style={{ padding: "9px 12px", textAlign: "left", fontWeight: 700, fontSize: 10, letterSpacing: "0.07em", textTransform: "uppercase", color: "#475569", whiteSpace: "nowrap", width: col.width || "auto" }}>
                       {col.header}
                     </th>
                   ))}
@@ -202,7 +214,7 @@ export default function StudentGrades({ user, courses, examSubmissions, enrollme
               <tbody>
                 {rows.map((row, i) => (
                   <React.Fragment key={row.courseId}>
-                    <tr style={{ background: i % 2 === 0 ? "#fff" : "#f8fafc", borderBottom: "1px solid #f1f5f9" }}>
+                    <tr style={{ background: i % 2 === 0 ? "#0f172a" : "#0f172a", borderBottom: "1px solid #1e293b" }}>
                       {cols.map(col => (
                         <td key={col.field + col.header}
                           style={{ padding: "9px 12px", verticalAlign: "middle", width: col.width || "auto" }}>
@@ -215,7 +227,7 @@ export default function StudentGrades({ user, courses, examSubmissions, enrollme
                     {expandedId === row.courseId && (
                       <tr className="drill-row">
                         <td colSpan={cols.length} style={{ padding: "0 12px 16px 28px" }}>
-                          <div style={{ background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: 10, overflow: "hidden" }}>
+                          <div style={{ background: "#0f172a", border: "1px solid #334155", borderRadius: 10, overflow: "hidden" }}>
                             {/* Formula reminder strip */}
                             <div style={{ background: "#1e293b", padding: "8px 16px", display: "flex", gap: 20 }}>
                               {[["📚 Course Work", "30%", "#818cf8"], ["🏆 Class Standing", "30%", "#34d399"], ["📝 Exams", "40%", "#fb923c"]].map(([lbl, pct, col]) => (
@@ -233,13 +245,13 @@ export default function StudentGrades({ user, courses, examSubmissions, enrollme
                                 const tm    = TERM_META[term];
                                 const hasCS = td.csEntry && csGradePct(td.csEntry) != null;
                                 return (
-                                  <div key={term} style={{ padding: "12px 14px", borderRight: ti < 3 ? "1px solid #e2e8f0" : "none", borderTop: "1px solid #e2e8f0" }}>
+                                  <div key={term} style={{ padding: "12px 14px", borderRight: ti < 3 ? "1px solid #334155" : "none", borderTop: "1px solid #334155" }}>
                                     {/* Term badge + computed grade */}
                                     <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
                                       <span style={{ fontSize: 10, fontWeight: 800, color: tm.color, background: tm.bg, padding: "2px 8px", borderRadius: 9999 }}>{term}</span>
                                       {td.grade != null
                                         ? <span className={cellGradeClass(td.grade)} style={{ fontSize: 15, fontWeight: 900, padding: "2px 8px", borderRadius: 6 }}>{td.grade}%</span>
-                                        : <span style={{ fontSize: 11, color: "#94a3b8" }}>Pending</span>}
+                                        : <span style={{ fontSize: 11, color: "#475569" }}>Pending</span>}
                                     </div>
 
                                     {/* Component rows */}
@@ -251,7 +263,7 @@ export default function StudentGrades({ user, courses, examSubmissions, enrollme
                                       <div key={label} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 5 }}>
                                         <div style={{ fontSize: 10, color: "#64748b", fontWeight: 600 }}>{label}</div>
                                         <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
-                                          <span style={{ fontSize: 9, color: "#94a3b8" }}>{weight}</span>
+                                          <span style={{ fontSize: 9, color: "#475569" }}>{weight}</span>
                                           {pct != null
                                             ? <span style={{ fontSize: 12, fontWeight: 800, color: gradeColor(pct) }}>{pct}%</span>
                                             : <span style={{ fontSize: 10, color: "#cbd5e1" }}>—</span>}
@@ -261,9 +273,9 @@ export default function StudentGrades({ user, courses, examSubmissions, enrollme
 
                                     {/* Class Standing detail */}
                                     {hasCS && (
-                                      <div style={{ marginTop: 6, background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 6, padding: "5px 8px" }}>
+                                      <div style={{ marginTop: 6, background: "rgba(16,185,129,.12)", border: "1px solid #bbf7d0", borderRadius: 6, padding: "5px 8px" }}>
                                         {[["Project", td.csEntry?.project], ["Recitation", td.csEntry?.recitation], ["Attendance", td.csEntry?.attendance]].map(([lbl, v]) => (
-                                          <div key={lbl} style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "#065f46", marginBottom: 2 }}>
+                                          <div key={lbl} style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "#34d399", marginBottom: 2 }}>
                                             <span>{lbl}</span>
                                             <span style={{ fontWeight: 700 }}>{v != null ? `${v}/100` : "—"}</span>
                                           </div>
@@ -299,7 +311,7 @@ export default function StudentGrades({ user, courses, examSubmissions, enrollme
           </div>
 
           {/* Footer */}
-          <div style={{ padding: "7px 12px", borderTop: "1px solid #e2e8f0", background: "#f8fafc", fontSize: 11, color: "#64748b", flexShrink: 0 }}>
+          <div style={{ padding: "7px 12px", borderTop: "1px solid #334155", background: "#0f172a", fontSize: 11, color: "#64748b", flexShrink: 0 }}>
             {rows.length} course{rows.length !== 1 ? "s" : ""} · Click "▼ Details" to see per-term grade breakdown
           </div>
         </div>

@@ -81,7 +81,7 @@ export default function SubmissionPortal({ material, user, existingSubmission, o
     <div style={{ display: "flex", flexDirection: "column", gap: 12, height: "100%", overflowY: "auto" }}>
       {/* Status row */}
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexShrink: 0 }}>
-        <div style={{ fontSize: 12, fontWeight: 800, color: "#0f172a" }}>Submission Portal</div>
+        <div style={{ fontSize: 12, fontWeight: 800, color: "#f1f5f9" }}>Submission Portal</div>
         <StatusBadge status={status} />
       </div>
 
@@ -102,10 +102,10 @@ export default function SubmissionPortal({ material, user, existingSubmission, o
 
       {/* Selected file card */}
       {file && (
-        <div className="mat-fade-up" style={{ background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: 8, padding: "10px 12px", display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
+        <div className="mat-fade-up" style={{ background: "#0f172a", border: "1px solid #334155", borderRadius: 8, padding: "10px 12px", display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
           <span style={{ fontSize: 22 }}>{fileIcon(file.name)}</span>
           <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ fontSize: 12, fontWeight: 700, color: "#1e293b", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{file.name}</div>
+            <div style={{ fontSize: 12, fontWeight: 700, color: "#e2e8f0", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{file.name}</div>
             <div style={{ fontSize: 11, color: "#64748b", marginTop: 1 }}>
               {fmtSize(file.size)}
               {submitted && submitAt && <span style={{ marginLeft: 6 }}>· {fmtDate(submitAt)}</span>}
@@ -119,10 +119,10 @@ export default function SubmissionPortal({ material, user, existingSubmission, o
       <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
         {!submitted
           ? <Btn onClick={submit} disabled={!file} style={{ flex: 1, justifyContent: "center" }}>
-              ↑ Submit {material.type === MaterialType.LAB ? "Lab" : "Assignment"}
+              ↑ Submit {material.type === MaterialType.LAB ? "Lab" : material.type === "Project" ? "Project" : "Assignment"}
             </Btn>
           : <>
-              <div style={{ flex: 1, padding: "8px 12px", background: "#d1fae5", borderRadius: 6, fontSize: 12, fontWeight: 700, color: "#065f46", display: "flex", alignItems: "center", gap: 6 }}>
+              <div style={{ flex: 1, padding: "8px 12px", background: "rgba(16,185,129,.15)", borderRadius: 6, fontSize: 12, fontWeight: 700, color: "#34d399", display: "flex", alignItems: "center", gap: 6 }}>
                 ✓ {status === SubmissionStatus.LATE ? "Late submission received" : "Confirmed"}
               </div>
               <Btn variant="ghost" size="sm" onClick={replace}>Replace</Btn>
@@ -138,8 +138,8 @@ export default function SubmissionPortal({ material, user, existingSubmission, o
       )}
 
       {/* Checklist */}
-      <div style={{ background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: 8, padding: "10px 12px", flexShrink: 0, marginTop: "auto" }}>
-        <div style={{ fontSize: 10, fontWeight: 800, color: "#0f172a", marginBottom: 7, textTransform: "uppercase", letterSpacing: "0.06em" }}>Checklist</div>
+      <div style={{ background: "#0f172a", border: "1px solid #334155", borderRadius: 8, padding: "10px 12px", flexShrink: 0, marginTop: "auto" }}>
+        <div style={{ fontSize: 10, fontWeight: 800, color: "#f1f5f9", marginBottom: 7, textTransform: "uppercase", letterSpacing: "0.06em" }}>Checklist</div>
         {[
           [!!file,                              "File attached (.pdf or .docx)"],
           [dueDate && new Date() <= dueDate,    "Submitted before due date"],
@@ -171,7 +171,7 @@ export default function SubmissionPortal({ material, user, existingSubmission, o
             </div>
           </div>
           {existingSubmission.feedback && (
-            <div style={{ background: "rgba(255,255,255,.7)", borderRadius: 7, padding: "9px 11px", fontSize: 12, color: "#334155", lineHeight: 1.55 }}>
+            <div style={{ background: "rgba(255,255,255,.7)", borderRadius: 7, padding: "9px 11px", fontSize: 12, color: "#cbd5e1", lineHeight: 1.55 }}>
               <div style={{ fontSize: 9, fontWeight: 800, color: "#64748b", textTransform: "uppercase", letterSpacing: "0.07em", marginBottom: 4 }}>Teacher's Feedback</div>
               {existingSubmission.feedback}
             </div>

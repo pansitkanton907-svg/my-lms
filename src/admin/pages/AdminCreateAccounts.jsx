@@ -1,5 +1,14 @@
-import React, { useState } from "react";
+/**
+ * AdminCreateAccounts.jsx
+ * FOLDER: src/admin/pages/AdminCreateAccounts.jsx
+ *
+ * Changes:
+ *  - Added Program dropdown for student accounts using programApi.getOptions (NestJS)
+ *  - Stores program_id in the students table on insert
+ */
+import React, { useState, useEffect } from "react";
 import { supabase } from "../../supabaseClient";
+import { programApi } from "../../lib/api";
 import { Badge, Btn, Input, Sel, FF, Toast } from "../../components/ui";
 import LMSGrid from "../../components/LMSGrid";
 import TopBar  from "../../components/TopBar";
@@ -8,16 +17,24 @@ export default function AdminCreateAccounts({ users, setUsers }) {
   const emptyForm = {
     username: "", fullName: "", email: "", civilStatus: "Single",
     birthdate: "", password: "", address: "",
-    yearLevel: "1st Year", semester: "1st Semester",
+    yearLevel: "1st Year", semester: "1st Semester", programId: "",
   };
 
-  const [role,   setRole]   = useState("student");
-  const [form,   setForm]   = useState(emptyForm);
-  const [errors, setErrors] = useState({});
-  const [toast,  setToast]  = useState("");
-  const [sel,    setSel]    = useState(null);
+  const [role,         setRole]         = useState("student");
+  const [form,         setForm]         = useState(emptyForm);
+  const [errors,       setErrors]       = useState({});
+  const [toast,        setToast]        = useState("");
+  const [sel,          setSel]          = useState(null);
+  const [programOpts,  setProgramOpts]  = useState([]);
 
   const upd = (f, v) => setForm(p => ({ ...p, [f]: v }));
+
+  // Load program options from NestJS on mount
+  useEffect(() => {
+    programApi.getOptions()
+      .then(opts => setProgramOpts(opts ?? []))
+      .catch(console.error);
+  }, []);
 
   const validate = () => {
     const e = {};
@@ -40,7 +57,7 @@ export default function AdminCreateAccounts({ users, setUsers }) {
       return;
     }
 
-    // 2. Generate display_id safely from the DB — avoids race conditions
+    // 2. Generate display_id safely from the DB
     const prefix = role === "student" ? "STU" : "TCH";
     const { data: maxRow } = await supabase
       .from("users")
@@ -75,18 +92,20 @@ export default function AdminCreateAccounts({ users, setUsers }) {
       return;
     }
 
-    // 4. Insert into role subclass table
+    // 4. Insert into role subclass table (include program_id for students)
     if (role === "student") {
       await supabase.from("students").insert({
         user_id:    newUserRow.user_id,
         year_level: form.yearLevel,
         semester:   form.semester,
+        program_id: form.programId ? Number(form.programId) : null,
       });
     } else {
       await supabase.from("teachers").insert({ user_id: newUserRow.user_id });
     }
 
-    // 5. Update local state so grid reflects immediately
+    // 5. Update local state
+    const programName = programOpts.find(p => String(p.programId) === String(form.programId))?.name || "";
     const newUser = {
       id:          displayId,
       username:    form.username.trim(),
@@ -98,6 +117,7 @@ export default function AdminCreateAccounts({ users, setUsers }) {
       role,
       yearLevel:   form.yearLevel,
       semester:    form.semester,
+      programName,
       password:    "",
     };
     setUsers(prev => [...prev, newUser]);
@@ -118,8 +138,9 @@ export default function AdminCreateAccounts({ users, setUsers }) {
     { field: "birthdate",   header: "Birthdate",     width: 100 },
     ...(role === "student"
       ? [
-          { field: "yearLevel", header: "Year",     width: 90 },
-          { field: "semester",  header: "Semester", width: 110 },
+          { field: "yearLevel",  header: "Year",     width: 90 },
+          { field: "semester",   header: "Semester", width: 110 },
+          { field: "programName",header: "Program" },
         ]
       : []),
   ];
@@ -130,14 +151,14 @@ export default function AdminCreateAccounts({ users, setUsers }) {
       <div style={{ flex: 1, display: "flex", overflow: "hidden" }}>
 
         {/* ── Create form ── */}
-        <div style={{ width: 320, borderRight: "1px solid #e2e8f0", padding: "16px 18px", display: "flex", flexDirection: "column", gap: 11, overflowY: "auto", flexShrink: 0, background: "#fff" }}>
+        <div style={{ width: 330, borderRight: "1px solid #334155", padding: "16px 18px", display: "flex", flexDirection: "column", gap: 11, overflowY: "auto", flexShrink: 0, background: "#1e293b" }}>
           <Toast msg={toast} />
 
           {/* Role toggle */}
-          <div style={{ display: "flex", background: "#f1f5f9", borderRadius: 8, padding: 3 }}>
+          <div style={{ display: "flex", background: "#0f172a", borderRadius: 8, padding: 3, border: "1px solid #334155" }}>
             {["student", "teacher"].map(r => (
               <button key={r} onClick={() => { setRole(r); setErrors({}); }}
-                style={{ flex: 1, padding: "7px", borderRadius: 6, border: "none", cursor: "pointer", fontFamily: "inherit", fontSize: 13, fontWeight: 700, textTransform: "capitalize", transition: "all .15s", background: role === r ? "#fff" : "transparent", color: role === r ? "#4f46e5" : "#64748b", boxShadow: role === r ? "0 1px 4px rgba(0,0,0,.1)" : "none" }}>
+                style={{ flex: 1, padding: "7px", borderRadius: 6, border: "none", cursor: "pointer", fontFamily: "inherit", fontSize: 13, fontWeight: 700, textTransform: "capitalize", transition: "all .15s", background: role === r ? "#1e293b" : "transparent", color: role === r ? "#fff" : "#64748b", boxShadow: role === r ? "0 0 0 1px #6366f1" : "none" }}>
                 {r === "student" ? "🎓 Student" : "👩‍🏫 Teacher"}
               </button>
             ))}
@@ -167,18 +188,29 @@ export default function AdminCreateAccounts({ users, setUsers }) {
           </FF>
 
           {role === "student" && (
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-              <FF label="Year Level">
-                <Sel value={form.yearLevel} onChange={e => upd("yearLevel", e.target.value)}>
-                  {["1st Year", "2nd Year", "3rd Year", "4th Year"].map(y => <option key={y}>{y}</option>)}
+            <>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                <FF label="Year Level">
+                  <Sel value={form.yearLevel} onChange={e => upd("yearLevel", e.target.value)}>
+                    {["1st Year", "2nd Year", "3rd Year", "4th Year"].map(y => <option key={y}>{y}</option>)}
+                  </Sel>
+                </FF>
+                <FF label="Semester">
+                  <Sel value={form.semester} onChange={e => upd("semester", e.target.value)}>
+                    {["1st Semester", "2nd Semester", "Summer"].map(s => <option key={s}>{s}</option>)}
+                  </Sel>
+                </FF>
+              </div>
+
+              <FF label="Program">
+                <Sel value={form.programId} onChange={e => upd("programId", e.target.value)}>
+                  <option value="">— No Program —</option>
+                  {programOpts.map(p => (
+                    <option key={p.programId} value={p.programId}>{p.code} — {p.name}</option>
+                  ))}
                 </Sel>
               </FF>
-              <FF label="Semester">
-                <Sel value={form.semester} onChange={e => upd("semester", e.target.value)}>
-                  {["1st Semester", "2nd Semester", "Summer"].map(s => <option key={s}>{s}</option>)}
-                </Sel>
-              </FF>
-            </div>
+            </>
           )}
 
           <div style={{ display: "flex", gap: 8, paddingTop: 4 }}>
@@ -188,7 +220,7 @@ export default function AdminCreateAccounts({ users, setUsers }) {
         </div>
 
         {/* ── Accounts grid ── */}
-        <div style={{ flex: 1, padding: "16px 18px", display: "flex", flexDirection: "column", overflow: "hidden", background: "#f8fafc" }}>
+        <div style={{ flex: 1, padding: "16px 18px", display: "flex", flexDirection: "column", overflow: "hidden", background: "#0f172a" }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10, flexShrink: 0 }}>
             <div style={{ fontSize: 11, fontWeight: 700, color: "#64748b", textTransform: "uppercase", letterSpacing: "0.06em" }}>
               {users.filter(u => u.role !== "admin").length} Accounts Registered
@@ -207,16 +239,16 @@ export default function AdminCreateAccounts({ users, setUsers }) {
 
         {/* ── Detail drawer ── */}
         {sel && (
-          <div style={{ width: 240, borderLeft: "1px solid #e2e8f0", background: "#fff", padding: "16px 14px", overflowY: "auto", flexShrink: 0 }}>
+          <div style={{ width: 240, borderLeft: "1px solid #334155", background: "#1e293b", padding: "16px 14px", overflowY: "auto", flexShrink: 0 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
-              <div style={{ fontWeight: 800, fontSize: 13, color: "#0f172a" }}>Account Details</div>
-              <button onClick={() => setSel(null)} style={{ border: "none", background: "none", cursor: "pointer", color: "#94a3b8", fontSize: 18, lineHeight: 1 }}>×</button>
+              <div style={{ fontWeight: 800, fontSize: 13, color: "#f1f5f9" }}>Account Details</div>
+              <button onClick={() => setSel(null)} style={{ border: "none", background: "none", cursor: "pointer", color: "#475569", fontSize: 18, lineHeight: 1 }}>×</button>
             </div>
             <div style={{ textAlign: "center", marginBottom: 14 }}>
-              <div style={{ width: 52, height: 52, borderRadius: "50%", background: sel.role === "student" ? "#d1fae5" : "#ede9fe", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 8px", fontSize: 20, fontWeight: 800, color: sel.role === "student" ? "#065f46" : "#5b21b6" }}>
+              <div style={{ width: 52, height: 52, borderRadius: "50%", background: sel.role === "student" ? "rgba(16,185,129,.15)" : "rgba(99,102,241,.15)", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 8px", fontSize: 20, fontWeight: 800, color: sel.role === "student" ? "#34d399" : "#a5b4fc" }}>
                 {sel.fullName?.charAt(0)}
               </div>
-              <div style={{ fontWeight: 800, fontSize: 14, color: "#1e293b", marginBottom: 4 }}>{sel.fullName}</div>
+              <div style={{ fontWeight: 800, fontSize: 14, color: "#e2e8f0", marginBottom: 4 }}>{sel.fullName}</div>
               <Badge color={sel.role === "student" ? "success" : "purple"}>{sel.role}</Badge>
             </div>
             {[
@@ -228,10 +260,11 @@ export default function AdminCreateAccounts({ users, setUsers }) {
               ["Address",      sel.address],
               ["Year Level",   sel.yearLevel],
               ["Semester",     sel.semester],
+              ["Program",      sel.programName],
             ].filter(([, v]) => v).map(([l, v]) => (
               <div key={l} style={{ marginBottom: 9 }}>
-                <div style={{ fontSize: 9, fontWeight: 700, color: "#94a3b8", textTransform: "uppercase", letterSpacing: "0.07em" }}>{l}</div>
-                <div style={{ fontSize: 12, color: "#334155", marginTop: 2 }}>{v}</div>
+                <div style={{ fontSize: 9, fontWeight: 700, color: "#475569", textTransform: "uppercase", letterSpacing: "0.07em" }}>{l}</div>
+                <div style={{ fontSize: 12, color: "#cbd5e1", marginTop: 2 }}>{v}</div>
               </div>
             ))}
           </div>

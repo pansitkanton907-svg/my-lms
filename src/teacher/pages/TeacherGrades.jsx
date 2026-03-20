@@ -86,16 +86,23 @@ export default function TeacherGrades({ user, courses, allUsers, examSubmissions
       ) || null;
       const cs = csGradePct(csEntry);
 
-      // Exams (40%)
+      // Exams (40%) and Quizzes (30%) — separated by examType
       const termExams = allExams.filter(ex => ex.courseId === courseId && ex.term === term);
       const subs      = examSubmissions.filter(s => s.studentId === studentDisplayId && s.courseId === courseId);
-      const examPcts  = termExams.map(ex => {
+
+      const examOnlyPcts  = termExams.filter(ex => (ex.examType || "Exam") === "Exam").map(ex => {
         const sub = subs.find(s => s.examId === ex.id);
         return sub ? Math.round((sub.score / sub.totalPoints) * 100) : null;
       }).filter(x => x != null);
-      const exam = examPcts.length > 0 ? Math.round(examPcts.reduce((a, b) => a + b, 0) / examPcts.length) : null;
+      const quizOnlyPcts = termExams.filter(ex => ex.examType === "Quiz").map(ex => {
+        const sub = subs.find(s => s.examId === ex.id);
+        return sub ? Math.round((sub.score / sub.totalPoints) * 100) : null;
+      }).filter(x => x != null);
 
-      result[term] = { cw, cs, csEntry, exam, grade: computeTermGrade({ cw, cs, exam }) };
+      const exam = examOnlyPcts.length  > 0 ? Math.round(examOnlyPcts.reduce((a, b) => a + b, 0)  / examOnlyPcts.length)  : null;
+      const quiz = quizOnlyPcts.length  > 0 ? Math.round(quizOnlyPcts.reduce((a, b) => a + b, 0) / quizOnlyPcts.length) : null;
+
+      result[term] = { cw, cs, csEntry, exam, quiz, grade: computeTermGrade({ cw, cs, exam, quiz }) };
     });
     return result;
   };
@@ -138,17 +145,17 @@ export default function TeacherGrades({ user, courses, allUsers, examSubmissions
     const g = row.termData[term]?.grade;
     return g != null
       ? <span className={cellGradeClass(g)} style={{ display: "block", textAlign: "center", fontWeight: 800, padding: "2px 6px", borderRadius: 5, fontSize: 12 }}>{g}%</span>
-      : <span style={{ color: "#94a3b8", fontSize: 11 }}>—</span>;
+      : <span style={{ color: "#475569", fontSize: 11 }}>—</span>;
   };
 
   const cols = [
     { field: "studentName", header: "Student", width: 160,
       cellRenderer: (v, row) => (
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <div style={{ width: 26, height: 26, borderRadius: "50%", background: "#ede9fe", color: "#6366f1", fontSize: 10, fontWeight: 900, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>{v?.charAt(0)}</div>
+          <div style={{ width: 26, height: 26, borderRadius: "50%", background: "rgba(99,102,241,.15)", color: "#6366f1", fontSize: 10, fontWeight: 900, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>{v?.charAt(0)}</div>
           <div>
-            <div style={{ fontWeight: 700, fontSize: 12, color: "#1e293b" }}>{v}</div>
-            <div style={{ fontSize: 10, color: "#94a3b8" }}>{row.studentId}</div>
+            <div style={{ fontWeight: 700, fontSize: 12, color: "#e2e8f0" }}>{v}</div>
+            <div style={{ fontSize: 10, color: "#475569" }}>{row.studentId}</div>
           </div>
         </div>
       )},
@@ -161,7 +168,7 @@ export default function TeacherGrades({ user, courses, allUsers, examSubmissions
     { field: "overall", header: "Overall", width: 88,
       cellRenderer: v => v != null
         ? <span className={cellGradeClass(v)} style={{ display: "block", textAlign: "center", fontWeight: 900, fontSize: 14, padding: "2px 6px", borderRadius: 5 }}>{v}%</span>
-        : <span style={{ color: "#94a3b8", fontSize: 11 }}>—</span> },
+        : <span style={{ color: "#475569", fontSize: 11 }}>—</span> },
     { field: "status", header: "Status", width: 80,
       cellRenderer: v => <Badge color={v === "Pass" ? "success" : v === "Fail" ? "danger" : "default"}>{v}</Badge> },
     { field: "studentId", header: "Actions", width: 150, sortable: false,
@@ -172,7 +179,7 @@ export default function TeacherGrades({ user, courses, allUsers, examSubmissions
             style={{ fontSize: 11, padding: "3px 9px" }}>
             🏆 Set CS
           </Btn>
-          <Btn size="sm" variant="ghost" style={{ border: "1px solid #e2e8f0", fontSize: 11, padding: "3px 9px" }}
+          <Btn size="sm" variant="ghost" style={{ border: "1px solid #334155", fontSize: 11, padding: "3px 9px" }}
             onClick={e => { e.stopPropagation(); setDetailRow(row); }}>
             View →
           </Btn>
@@ -183,10 +190,10 @@ export default function TeacherGrades({ user, courses, allUsers, examSubmissions
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
       <TopBar title="Grade Students"
-        subtitle="Formula: Course Work 30% + Class Standing 30% + Exams 40%"
+        subtitle="Quiz 30% · Course Work 30% · Class Standing 30% · Exam 40%"
         actions={
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-            {toast && <span style={{ fontSize: 12, color: "#065f46", fontWeight: 700, background: "#d1fae5", padding: "4px 10px", borderRadius: 6 }}>✓ {toast}</span>}
+            {toast && <span style={{ fontSize: 12, color: "#34d399", fontWeight: 700, background: "rgba(16,185,129,.15)", padding: "4px 10px", borderRadius: 6 }}>✓ {toast}</span>}
             <Sel value={filterCourse} onChange={e => setFilterCourse(e.target.value)} style={{ width: "auto", fontSize: 12 }}>
               <option value="all">All Courses</option>
               {myCourses.map(c => <option key={c.id} value={c.id}>{c.code}</option>)}
@@ -212,15 +219,15 @@ export default function TeacherGrades({ user, courses, allUsers, examSubmissions
         </div>
 
         {/* Formula legend */}
-        <div style={{ display: "flex", gap: 16, padding: "6px 10px", background: "#fff", borderRadius: 7, border: "1px solid #e2e8f0", flexShrink: 0, alignItems: "center" }}>
+        <div style={{ display: "flex", gap: 16, padding: "6px 10px", background: "#1e293b", borderRadius: 7, border: "1px solid #334155", flexShrink: 0, alignItems: "center" }}>
           <span style={{ fontSize: 10, fontWeight: 800, color: "#64748b", textTransform: "uppercase", letterSpacing: "0.06em" }}>Formula</span>
-          {[["📚 Course Work", "30%", "#ede9fe", "#6366f1"], ["🏆 Class Standing", "30%", "#d1fae5", "#10b981"], ["📝 Exams", "40%", "#fef3c7", "#f59e0b"]].map(([lbl, pct, bg, col]) => (
+          {[["📚 Course Work", "30%", "#ede9fe", "#6366f1"], ["🏆 Class Standing", "30%", "#d1fae5", "#10b981"], ["📝 Exams", "40%", "#fef3c7", "#f59e0b"], ["✏ Quizzes", "30%", "#fce7f3", "#ec4899"]].map(([lbl, pct, bg, col]) => (
             <div key={lbl} style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11 }}>
               <span style={{ background: bg, color: col, fontWeight: 800, padding: "2px 8px", borderRadius: 9999 }}>{pct}</span>
               <span style={{ color: "#64748b" }}>{lbl}</span>
             </div>
           ))}
-          <span style={{ fontSize: 11, color: "#94a3b8", marginLeft: "auto" }}>Click "🏆 Set CS" to enter Project / Recitation / Attendance grades</span>
+          <span style={{ fontSize: 11, color: "#475569", marginLeft: "auto" }}>Click "🏆 Set CS" to enter Project / Recitation / Attendance grades</span>
         </div>
 
         {/* Grid */}
@@ -258,13 +265,13 @@ export default function TeacherGrades({ user, courses, allUsers, examSubmissions
       {/* Student Detail Modal */}
       {detailRow && (
         <div className="modal-overlay" onClick={e => e.target === e.currentTarget && setDetailRow(null)}>
-          <div className="modal-box" style={{ background: "#fff", borderRadius: 14, width: 680, maxHeight: "88vh", display: "flex", flexDirection: "column", overflow: "hidden", boxShadow: "0 24px 80px rgba(0,0,0,.25)" }}>
-            <div style={{ padding: "16px 20px", borderBottom: "1px solid #e2e8f0", background: "#fafafa", display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexShrink: 0 }}>
+          <div className="modal-box" style={{ background: "#1e293b", borderRadius: 14, width: 680, maxHeight: "88vh", display: "flex", flexDirection: "column", overflow: "hidden", boxShadow: "0 24px 80px rgba(0,0,0,.25)" }}>
+            <div style={{ padding: "16px 20px", borderBottom: "1px solid #334155", background: "#0f172a", display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexShrink: 0 }}>
               <div>
-                <div style={{ fontWeight: 900, fontSize: 15, color: "#0f172a" }}>{detailRow.studentName}</div>
-                <div style={{ fontSize: 12, color: "#64748b", marginTop: 2 }}>{detailRow.courseCode} · {detailRow.courseName}</div>
+                <div style={{ fontWeight: 900, fontSize: 15, color: "#f1f5f9" }}>{detailRow.studentName}</div>
+                <div style={{ fontSize: 12, color: "#94a3b8", marginTop: 2 }}>{detailRow.courseCode} · {detailRow.courseName}</div>
               </div>
-              <button onClick={() => setDetailRow(null)} style={{ border: "none", background: "none", cursor: "pointer", color: "#94a3b8", fontSize: 22 }}
+              <button onClick={() => setDetailRow(null)} style={{ border: "none", background: "none", cursor: "pointer", color: "#475569", fontSize: 22 }}
                 onMouseEnter={e => e.currentTarget.style.color = "#ef4444"}
                 onMouseLeave={e => e.currentTarget.style.color = "#94a3b8"}>×</button>
             </div>
@@ -282,7 +289,7 @@ export default function TeacherGrades({ user, courses, allUsers, examSubmissions
                     const g  = detailRow.termData[term]?.grade;
                     const tm = TERM_META[term];
                     return (
-                      <div key={term} style={{ background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: 8, padding: "10px 8px", textAlign: "center" }}>
+                      <div key={term} style={{ background: "#0f172a", border: "1px solid #334155", borderRadius: 8, padding: "10px 8px", textAlign: "center" }}>
                         <div style={{ fontSize: 9, fontWeight: 800, color: tm.color, background: tm.bg, padding: "2px 7px", borderRadius: 9999, display: "inline-block", marginBottom: 6 }}>{term}</div>
                         <div style={{ fontSize: 20, fontWeight: 900, color: g != null ? gradeColor(g) : "#94a3b8" }}>{g != null ? `${g}%` : "—"}</div>
                       </div>
@@ -296,20 +303,21 @@ export default function TeacherGrades({ user, courses, allUsers, examSubmissions
                 const td = detailRow.termData[term];
                 const tm = TERM_META[term];
                 return (
-                  <div key={term} style={{ marginBottom: 14, border: "1px solid #e2e8f0", borderRadius: 9, overflow: "hidden" }}>
-                    <div style={{ background: "#f8fafc", padding: "8px 14px", display: "flex", alignItems: "center", justifyContent: "space-between", borderBottom: "1px solid #e2e8f0" }}>
+                  <div key={term} style={{ marginBottom: 14, border: "1px solid #334155", borderRadius: 9, overflow: "hidden" }}>
+                    <div style={{ background: "#0f172a", padding: "8px 14px", display: "flex", alignItems: "center", justifyContent: "space-between", borderBottom: "1px solid #334155" }}>
                       <span style={{ fontSize: 11, fontWeight: 800, color: tm.color, background: tm.bg, padding: "2px 9px", borderRadius: 9999 }}>{term}</span>
                       {td.grade != null
                         ? <span className={cellGradeClass(td.grade)} style={{ fontWeight: 900, padding: "3px 10px", borderRadius: 6 }}>{td.grade}%</span>
-                        : <span style={{ fontSize: 11, color: "#94a3b8" }}>Pending</span>}
+                        : <span style={{ fontSize: 11, color: "#475569" }}>Pending</span>}
                     </div>
-                    <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 0 }}>
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 0 }}>
                       {[
                         { label: "📚 Course Work",    pct: td.cw,   weight: "30%", color: "#6366f1", bg: "#ede9fe" },
+                        { label: "✏ Quizzes",         pct: td.quiz, weight: "30%", color: "#ec4899", bg: "#fce7f3" },
                         { label: "🏆 Class Standing", pct: td.cs,   weight: "30%", color: "#10b981", bg: "#d1fae5" },
                         { label: "📝 Exams",          pct: td.exam, weight: "40%", color: "#f59e0b", bg: "#fef3c7" },
                       ].map(({ label, pct, weight, color, bg }, ci) => (
-                        <div key={label} style={{ padding: "10px 14px", borderRight: ci < 2 ? "1px solid #f1f5f9" : "none" }}>
+                        <div key={label} style={{ padding: "10px 14px", borderRight: ci < 3 ? "1px solid #1e293b" : "none" }}>
                           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
                             <span style={{ fontSize: 10, fontWeight: 700, color: "#64748b" }}>{label}</span>
                             <span style={{ fontSize: 9, fontWeight: 700, color, background: bg, padding: "1px 6px", borderRadius: 9999 }}>{weight}</span>
@@ -334,7 +342,7 @@ export default function TeacherGrades({ user, courses, allUsers, examSubmissions
               })}
             </div>
 
-            <div style={{ padding: "12px 20px", borderTop: "1px solid #e2e8f0", background: "#fafafa", display: "flex", gap: 10, justifyContent: "flex-end" }}>
+            <div style={{ padding: "12px 20px", borderTop: "1px solid #334155", background: "#0f172a", display: "flex", gap: 10, justifyContent: "flex-end" }}>
               <Btn variant="secondary" onClick={() => { setDetailRow(null); setCsModal({ student: detailRow._student, course: detailRow._course }); }}>
                 🏆 Edit Class Standing
               </Btn>

@@ -19,8 +19,8 @@ export default function ExamPreview({ exam, onClose }) {
       </div>
 
       {/* Exam paper */}
-      <div style={{ flex: 1, overflowY: "auto", background: "#f1f5f9", padding: "24px" }}>
-        <div style={{ maxWidth: 760, margin: "0 auto", background: "#fff", borderRadius: 12, border: "1px solid #e2e8f0", overflow: "hidden", boxShadow: "0 4px 24px rgba(0,0,0,.07)" }}>
+      <div style={{ flex: 1, overflowY: "auto", background: "#0f172a", padding: "24px" }}>
+        <div style={{ maxWidth: 760, margin: "0 auto", background: "#1e293b", borderRadius: 12, border: "1px solid #334155", overflow: "hidden", boxShadow: "0 4px 24px rgba(0,0,0,.07)" }}>
           {/* Header */}
           <div style={{ background: "#1e293b", padding: "20px 28px" }}>
             <div style={{ fontWeight: 900, fontSize: 20, color: "#fff", letterSpacing: "-0.02em", marginBottom: 4 }}>
@@ -35,7 +35,7 @@ export default function ExamPreview({ exam, onClose }) {
           </div>
 
           {/* Instruction strip */}
-          <div style={{ background: "#f8fafc", borderBottom: "1px solid #e2e8f0", padding: "9px 28px" }}>
+          <div style={{ background: "#0f172a", borderBottom: "1px solid #334155", padding: "9px 28px" }}>
             <span style={{ fontSize: 12, color: "#64748b", fontStyle: "italic" }}>Read each item carefully. Write your answers legibly.</span>
           </div>
 
@@ -50,7 +50,7 @@ export default function ExamPreview({ exam, onClose }) {
           </div>
 
           {/* Footer */}
-          <div style={{ borderTop: "1px solid #f1f5f9", padding: "14px 28px", display: "flex", justifyContent: "space-between", alignItems: "center", background: "#f8fafc" }}>
+          <div style={{ borderTop: "1px solid #1e293b", padding: "14px 28px", display: "flex", justifyContent: "space-between", alignItems: "center", background: "#0f172a" }}>
             <span style={{ fontSize: 12, color: "#94a3b8" }}>— End of Exam —</span>
             <span style={{ fontSize: 13, fontWeight: 800, color: "#4f46e5" }}>Total: {totalPts} pts</span>
           </div>

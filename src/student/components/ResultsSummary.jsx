@@ -52,18 +52,18 @@ export default function ResultsSummary({ exam, answers, submission, onBack }) {
         ].map(([lbl, val, col]) => (
           <div key={lbl} style={{ flex: 1, textAlign: "center", padding: "10px 6px", borderRight: "1px solid rgba(255,255,255,.06)" }}>
             <div style={{ fontSize: 16, fontWeight: 900, color: col }}>{val}</div>
-            <div style={{ fontSize: 10, color: "#475569", marginTop: 2, textTransform: "uppercase", letterSpacing: "0.05em" }}>{lbl}</div>
+            <div style={{ fontSize: 10, color: "#94a3b8", marginTop: 2, textTransform: "uppercase", letterSpacing: "0.05em" }}>{lbl}</div>
           </div>
         ))}
       </div>
 
       {/* Per-question breakdown (scrollable) */}
-      <div style={{ flex: 1, overflowY: "auto", padding: "18px 24px", background: "#f8fafc" }}>
+      <div style={{ flex: 1, overflowY: "auto", padding: "18px 24px", background: "#0f172a" }}>
         {!exam.instantFeedback
           ? (
             <div style={{ textAlign: "center", padding: "40px", color: "#64748b" }}>
               <div style={{ fontSize: 32, marginBottom: 10 }}>🔒</div>
-              <div style={{ fontWeight: 800, fontSize: 15, color: "#1e293b", marginBottom: 6 }}>Answers Hidden</div>
+              <div style={{ fontWeight: 800, fontSize: 15, color: "#e2e8f0", marginBottom: 6 }}>Answers Hidden</div>
               <div style={{ fontSize: 13 }}>The teacher has disabled instant feedback for this exam. Results will be released manually.</div>
             </div>
           )
@@ -76,13 +76,13 @@ export default function ResultsSummary({ exam, answers, submission, onBack }) {
                 const given   = answers[q.id];
                 const isRight = given === q.correctAnswer;
                 return (
-                  <div key={q.id} style={{ background: "#fff", border: `1.5px solid ${isRight ? "#bbf7d0" : "#fecaca"}`, borderRadius: 10, padding: "14px 16px" }}>
+                  <div key={q.id} style={{ background: "#1e293b", border: `1.5px solid ${isRight ? "#bbf7d0" : "#fecaca"}`, borderRadius: 10, padding: "14px 16px" }}>
                     <div style={{ display: "flex", alignItems: "flex-start", gap: 10, marginBottom: 10 }}>
                       <div style={{ width: 26, height: 26, borderRadius: "50%", background: isRight ? "#d1fae5" : "#fee2e2", color: isRight ? "#065f46" : "#dc2626", fontSize: 13, fontWeight: 900, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
                         {isRight ? "✓" : "✗"}
                       </div>
                       <div style={{ flex: 1 }}>
-                        <div style={{ fontSize: 13, fontWeight: 700, color: "#1e293b", marginBottom: 6 }}>{i + 1}. {q.questionText}</div>
+                        <div style={{ fontSize: 13, fontWeight: 700, color: "#e2e8f0", marginBottom: 6 }}>{i + 1}. {q.questionText}</div>
 
                         {/* MCQ */}
                         {q.type === "MCQ" && (
@@ -104,7 +104,7 @@ export default function ResultsSummary({ exam, answers, submission, onBack }) {
                         {q.type === "TF" && (
                           <div style={{ fontSize: 12, color: "#64748b" }}>
                             <span>Your answer: <strong style={{ color: isRight ? "#065f46" : "#dc2626" }}>{given || "No answer"}</strong></span>
-                            {!isRight && <span style={{ marginLeft: 12 }}>Correct: <strong style={{ color: "#065f46" }}>{q.correctAnswer}</strong></span>}
+                            {!isRight && <span style={{ marginLeft: 12 }}>Correct: <strong style={{ color: "#34d399" }}>{q.correctAnswer}</strong></span>}
                           </div>
                         )}
 
@@ -112,7 +112,7 @@ export default function ResultsSummary({ exam, answers, submission, onBack }) {
                         {q.type === "Identification" && (
                           <div style={{ fontSize: 12, color: "#64748b" }}>
                             <span>Your answer: <strong style={{ color: isRight ? "#065f46" : "#dc2626" }}>{given || "No answer"}</strong></span>
-                            {!isRight && <span style={{ marginLeft: 12 }}>Expected: <strong style={{ color: "#065f46" }}>{q.correctAnswer}</strong></span>}
+                            {!isRight && <span style={{ marginLeft: 12 }}>Expected: <strong style={{ color: "#34d399" }}>{q.correctAnswer}</strong></span>}
                           </div>
                         )}
                       </div>

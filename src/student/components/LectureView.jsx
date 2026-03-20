@@ -10,7 +10,7 @@ export default function LectureView({ material }) {
   return (
     <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
       {/* Banner */}
-      <div style={{ background: `linear-gradient(135deg,${m.light} 0%,#fff 100%)`, borderBottom: "1px solid #e2e8f0", padding: "14px 22px", flexShrink: 0 }}>
+      <div style={{ background: `linear-gradient(135deg,${m.light} 0%,#fff 100%)`, borderBottom: "1px solid #334155", padding: "14px 22px", flexShrink: 0 }}>
         <div style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
           <div style={{ width: 44, height: 44, borderRadius: 11, background: m.bg, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 22, flexShrink: 0 }}>
             {m.icon}
@@ -20,11 +20,11 @@ export default function LectureView({ material }) {
               <TypeBadge type={material.type} />
               <span style={{ fontSize: 11, color: "#94a3b8" }}>{material.date}</span>
             </div>
-            <h1 style={{ fontSize: 18, fontWeight: 900, color: "#0f172a", letterSpacing: "-0.02em", marginBottom: 3 }}>{material.title}</h1>
+            <h1 style={{ fontSize: 18, fontWeight: 900, color: "#f1f5f9", letterSpacing: "-0.02em", marginBottom: 3 }}>{material.title}</h1>
             <p style={{ fontSize: 12, color: "#64748b", margin: 0 }}>{material.description}</p>
           </div>
           {/* Read-only lock badge */}
-          <div style={{ background: "#f1f5f9", border: "1px solid #e2e8f0", borderRadius: 8, padding: "8px 12px", textAlign: "center", flexShrink: 0 }}>
+          <div style={{ background: "#0f172a", border: "1px solid #334155", borderRadius: 8, padding: "8px 12px", textAlign: "center", flexShrink: 0 }}>
             <div style={{ fontSize: 14, marginBottom: 2 }}>🔒</div>
             <div style={{ fontSize: 9, fontWeight: 700, color: "#94a3b8", textTransform: "uppercase", letterSpacing: "0.06em" }}>Read Only</div>
           </div>
@@ -42,7 +42,7 @@ export default function LectureView({ material }) {
 
         {/* Teacher attachment download */}
         {material.attachment_url && (
-          <div style={{ marginTop: 18, padding: "11px 14px", background: "#f0f9ff", border: "1px solid #bae6fd", borderRadius: 8, display: "flex", alignItems: "center", gap: 10 }}>
+          <div style={{ marginTop: 18, padding: "11px 14px", background: "#1a2a3a", border: "1px solid #bae6fd", borderRadius: 8, display: "flex", alignItems: "center", gap: 10 }}>
             <span style={{ fontSize: 18 }}>{fileIcon(material.attachment_name)}</span>
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ fontSize: 12, fontWeight: 700, color: "#0369a1", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{material.attachment_name || "Attachment"}</div>

@@ -8,7 +8,7 @@ import renderMarkdown from "../../student/components/renderMarkdown";
 import TeacherGradingDashboard from "./TeacherGradingDashboard";
 
 /** Dual-pane: left = instructions (+ edit mode), right = grading dashboard. */
-export default function TeacherAssignmentDetailView({ material, courseId, allUsers, user, onUpdate, gradeEntries, onGradeUpdate, enrollments }) {
+export default function TeacherAssignmentDetailView({ material, courseId, courseUuid, allUsers, user, onUpdate, gradeEntries, onGradeUpdate, enrollments }) {
   const [editMode,    setEditMode]    = useState(false);
   const [editTitle,   setEditTitle]   = useState(material.title);
   const [editContent, setEditContent] = useState(material.content || "");
@@ -72,12 +72,13 @@ export default function TeacherAssignmentDetailView({ material, courseId, allUse
     showToast("Assignment updated!");
   };
 
+  const todayStr = new Date().toISOString().slice(0, 10);
   const m = MAT_META[material.type] || MAT_META[MaterialType.ASSIGNMENT];
 
   return (
     <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
       {/* Banner */}
-      <div style={{ background: `linear-gradient(135deg,${m.light} 0%,#fff 100%)`, borderBottom: "1px solid #e2e8f0", padding: "11px 20px", flexShrink: 0 }}>
+      <div style={{ background: `linear-gradient(135deg,${m.light} 0%,#fff 100%)`, borderBottom: "1px solid #334155", padding: "11px 20px", flexShrink: 0 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 11 }}>
           <div style={{ width: 40, height: 40, borderRadius: 10, background: m.bg, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20, flexShrink: 0 }}>{m.icon}</div>
           <div style={{ flex: 1, minWidth: 0 }}>
@@ -87,10 +88,10 @@ export default function TeacherAssignmentDetailView({ material, courseId, allUse
               {material.points    && <span style={{ fontSize: 11, fontWeight: 800, color: m.color }}>· {material.points} pts</span>}
               {material.dueDate   && <span style={{ fontSize: 11, color: "#ef4444", fontWeight: 700 }}>· Due {new Date(material.dueDate).toLocaleDateString("en-US", { month: "short", day: "numeric" })}</span>}
             </div>
-            <div style={{ fontSize: 16, fontWeight: 900, color: "#0f172a", letterSpacing: "-0.02em" }}>{material.title}</div>
+            <div style={{ fontSize: 16, fontWeight: 900, color: "#f1f5f9", letterSpacing: "-0.02em" }}>{material.title}</div>
           </div>
           <div style={{ display: "flex", gap: 6, alignItems: "center", flexShrink: 0 }}>
-            {toast && <span style={{ fontSize: 11, fontWeight: 700, color: "#065f46", background: "#d1fae5", padding: "3px 8px", borderRadius: 5 }}>✓ {toast}</span>}
+            {toast && <span style={{ fontSize: 11, fontWeight: 700, color: "#34d399", background: "rgba(16,185,129,.15)", padding: "3px 8px", borderRadius: 5 }}>✓ {toast}</span>}
             <Btn variant={editMode ? "danger" : "secondary"} size="sm"
               onClick={() => { if (!saving) { setEditMode(e => !e); setToast(""); } }}>
               {editMode ? "✕ Cancel" : "✏ Edit"}
@@ -103,8 +104,8 @@ export default function TeacherAssignmentDetailView({ material, courseId, allUse
       {/* Dual pane */}
       <div style={{ flex: 1, display: "flex", overflow: "hidden" }}>
         {/* LEFT — instructions / edit form */}
-        <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", borderRight: "1px solid #e2e8f0" }}>
-          <div style={{ padding: "8px 18px", borderBottom: "1px solid #f1f5f9", background: "#fafafa", flexShrink: 0 }}>
+        <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", borderRight: "1px solid #334155" }}>
+          <div style={{ padding: "8px 18px", borderBottom: "1px solid #1e293b", background: "#0f172a", flexShrink: 0 }}>
             <span style={{ fontSize: 10, fontWeight: 800, color: "#64748b", textTransform: "uppercase", letterSpacing: "0.07em" }}>
               {editMode ? "✏ Edit Assignment" : "📋 Instructions & Objectives"}
             </span>
@@ -114,7 +115,7 @@ export default function TeacherAssignmentDetailView({ material, courseId, allUse
             <div style={{ flex: 1, overflowY: "auto", padding: "14px 18px", display: "flex", flexDirection: "column", gap: 12 }}>
               <FF label="Title" required><Input value={editTitle} onChange={e => setEditTitle(e.target.value)} /></FF>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-                <FF label="Due Date"><Input type="datetime-local" value={editDue} onChange={e => setEditDue(e.target.value)} /></FF>
+                <FF label="Due Date"><Input type="datetime-local" value={editDue} onChange={e => setEditDue(e.target.value)} min={todayStr} /></FF>
                 <FF label="Total Points"><Input type="number" value={editPoints} onChange={e => setEditPoints(e.target.value)} placeholder="100" /></FF>
               </div>
               <FF label="Instructions (Markdown)">
@@ -122,7 +123,7 @@ export default function TeacherAssignmentDetailView({ material, courseId, allUse
                   style={{ fontFamily: "'JetBrains Mono',monospace", fontSize: 12 }} />
               </FF>
               <div>
-                <label style={{ fontSize: 10, fontWeight: 700, color: "#475569", textTransform: "uppercase", letterSpacing: "0.06em", display: "block", marginBottom: 5 }}>
+                <label style={{ fontSize: 10, fontWeight: 700, color: "#94a3b8", textTransform: "uppercase", letterSpacing: "0.06em", display: "block", marginBottom: 5 }}>
                   Attach Supplementary File
                 </label>
                 <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
@@ -130,7 +131,7 @@ export default function TeacherAssignmentDetailView({ material, courseId, allUse
                     onChange={e => handleFileUpload(e.target.files?.[0])} />
                   <Btn variant="secondary" size="sm" onClick={() => fileRef.current?.click()}>📎 Attach File</Btn>
                   {uploadedFile
-                    ? <span style={{ fontSize: 12, color: "#065f46", fontWeight: 600 }}>✓ {uploadedFile.name}</span>
+                    ? <span style={{ fontSize: 12, color: "#34d399", fontWeight: 600 }}>✓ {uploadedFile.name}</span>
                     : material.attachment_name
                       ? <span style={{ fontSize: 12, color: "#64748b" }}>Current: <strong style={{ color: "#0369a1" }}>{material.attachment_name}</strong></span>
                       : <span style={{ fontSize: 12, color: "#94a3b8", fontStyle: "italic" }}>No attachment yet</span>
@@ -147,7 +148,7 @@ export default function TeacherAssignmentDetailView({ material, courseId, allUse
                 }
               </div>
               {(material.attachment_url || material.attachment_name) && (
-                <div style={{ marginTop: 18, padding: "11px 14px", background: "#f0f9ff", border: "1px solid #bae6fd", borderRadius: 8, display: "flex", alignItems: "center", gap: 10 }}>
+                <div style={{ marginTop: 18, padding: "11px 14px", background: "#1a2a3a", border: "1px solid #bae6fd", borderRadius: 8, display: "flex", alignItems: "center", gap: 10 }}>
                   <span style={{ fontSize: 18 }}>{fileIcon(material.attachment_name)}</span>
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ fontSize: 12, fontWeight: 700, color: "#0369a1", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{material.attachment_name || "Attachment"}</div>
@@ -171,6 +172,7 @@ export default function TeacherAssignmentDetailView({ material, courseId, allUse
           <TeacherGradingDashboard
             material={material}
             courseId={courseId}
+            courseUuid={courseUuid}
             allUsers={allUsers}
             user={user}
             gradeEntries={gradeEntries}

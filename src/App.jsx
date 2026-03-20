@@ -1,12 +1,23 @@
+/**
+ * App.jsx — Root component
+ * FOLDER: src/App.jsx  (replace existing)
+ *
+ * Changes:
+ *  - After sub_admin login, fetches their scope from the sub_admins table
+ *    and attaches it as user.subAdminScope before rendering SubAdminDashboard.
+ *    scope === "department" → full access (accounts, password reset, announcements, chat)
+ *    any other scope       → restricted access (announcements + chat only)
+ */
 import React, { useState, useEffect } from "react";
 import "./App.css";
 import { supabase } from "./supabaseClient";
 import { normalizeUser, normalizeMaterial, normalizeExam } from "./lib/normalizers";
 
-import LoginPage        from "./LoginPage";
-import AdminDashboard   from "./admin/AdminDashboard";
-import StudentDashboard from "./student/StudentDashboard";
-import TeacherDashboard from "./teacher/TeacherDashboard";
+import LoginPage         from "./LoginPage";
+import AdminDashboard    from "./admin/AdminDashboard";
+import SubAdminDashboard from "./sub-admin/SubAdminDashboard";
+import StudentDashboard  from "./student/StudentDashboard";
+import TeacherDashboard  from "./teacher/TeacherDashboard";
 
 export default function App() {
   const [currentUser,     setCurrentUser]     = useState(null);
@@ -15,7 +26,7 @@ export default function App() {
   const [enrollments,     setEnrollments]     = useState([]);
   const [examSubmissions, setExamSubmissions] = useState([]);
 
-  // ── Load users ──────────────────────────────────────────────────────────────
+  // ── Load users ───────────────────────────────────────────────────────────────
   useEffect(() => {
     async function loadUsers() {
       const [userRes, stuRes, tchRes] = await Promise.all([
@@ -37,52 +48,72 @@ export default function App() {
     loadUsers();
   }, []);
 
-  // ── Load courses (with teacher + schedule joins) ────────────────────────────
+  // ── Load courses ───────────────────────────────────────────────────────────────────────────────────
   useEffect(() => {
     async function loadCourses() {
-      const [courseRes, tcaRes, schedRes] = await Promise.all([
-        supabase.from("courses").select("*").eq("is_active", true),
-        supabase.from("teacher_course_assignments").select("teacher_id, course_id, schedule_id"),
-        supabase.from("schedules").select("schedule_id, course_id, schedule_label, year_level, semester"),
-      ]);
-      const rawCourses = courseRes.data  || [];
-      const tcas       = tcaRes.data     || [];
-      const schedules  = schedRes.data   || [];
+      // Fetch courses + schedules (no teacher join here)
+      const { data: rawCourses, error } = await supabase
+        .from("courses")
+        .select(`
+          course_id, course_code, course_name, units, status, program_id,
+          schedules ( schedule_id, schedule_label, year_level, semester )
+        `)
+        .eq("is_active", true);
 
-      // Fetch teacher display names
-      const teacherIds = [...new Set(tcas.map(t => t.teacher_id))];
+      if (error || !rawCourses) return;
+
+      // Fetch teacher assignments separately with explicit ORDER BY assigned_at DESC.
+      // Supabase embedded select does NOT sort nested arrays reliably — only a
+      // top-level query with .order() guarantees the latest assignment per course.
+      const courseIds = rawCourses.map(c => c.course_id);
+      const { data: tcaData } = await supabase
+        .from("teacher_course_assignments")
+        .select("course_id, teacher_id, assigned_at")
+        .in("course_id", courseIds)
+        .order("assigned_at", { ascending: false });
+
+      // Build map: course_id → latest teacher_id (first row after ORDER BY DESC)
+      const tcaMap = {};
+      (tcaData ?? []).forEach(row => {
+        if (!tcaMap[row.course_id]) tcaMap[row.course_id] = row.teacher_id;
+      });
+
+      // Bulk fetch all assigned teacher user records
+      const teacherIds = [...new Set(Object.values(tcaMap).filter(Boolean))];
       let teacherMap = {};
       if (teacherIds.length) {
         const { data: tUsers } = await supabase
-          .from("users").select("user_id, display_id, full_name").in("user_id", teacherIds);
+          .from("users")
+          .select("user_id, display_id, full_name")
+          .in("user_id", teacherIds);
         (tUsers || []).forEach(u => { teacherMap[u.user_id] = u; });
       }
 
       setCourses(rawCourses.map(c => {
-        const tca     = tcas.find(t => t.course_id === c.course_id);
-        // Look up schedule by course_id — most TCA rows have schedule_id = null
-        const sch     = schedules.find(s => s.course_id === c.course_id);
-        const teacher = tca ? teacherMap[tca.teacher_id] : null;
+        const sch     = c.schedules?.[0] ?? null;
+        const tId     = tcaMap[c.course_id] ?? null;
+        const teacher = tId ? teacherMap[tId] ?? null : null;
         return {
           id:          c.course_code,
           code:        c.course_code,
           name:        c.course_name,
-          teacher:     teacher?.display_id  || "",
-          teacherName: teacher?.full_name   || "Unassigned",
-          schedule:    sch?.schedule_label  || "",
+          teacher:     teacher?.display_id || "",
+          teacherName: teacher?.full_name  || "Unassigned",
+          schedule:    sch?.schedule_label || "",
           units:       c.units,
-          yearLevel:   sch?.year_level      || "",
-          semester:    sch?.semester        || "",
-          status:      c.status             || "Ongoing",
+          yearLevel:   sch?.year_level     || "",
+          semester:    sch?.semester       || "",
+          status:      c.status            || "Ongoing",
+          programId:   c.program_id        ?? null,
           _uuid:       c.course_id,
-          _scheduleId: sch?.schedule_id     || null,
+          _scheduleId: sch?.schedule_id    ?? null,
         };
       }));
     }
     loadCourses();
   }, []);
 
-  // ── Load enrollments ────────────────────────────────────────────────────────
+    // ── Load enrollments ─────────────────────────────────────────────────────────
   useEffect(() => {
     async function loadEnrollments() {
       const { data } = await supabase
@@ -109,7 +140,7 @@ export default function App() {
     loadEnrollments();
   }, []);
 
-  // ── Load exam submissions ───────────────────────────────────────────────────
+  // ── Load exam submissions ────────────────────────────────────────────────────
   useEffect(() => {
     async function loadExamSubmissions() {
       const { data: subs } = await supabase
@@ -150,7 +181,7 @@ export default function App() {
     loadExamSubmissions();
   }, []);
 
-  // ── Handle exam submit (student → persists to DB + lifts to App state) ──────
+  // ── Exam submit handler ──────────────────────────────────────────────────────
   const handleSubmitExam = async (submission) => {
     const { data: savedSub, error: subErr } = await supabase
       .from("exam_submissions")
@@ -164,7 +195,6 @@ export default function App() {
       .single();
 
     const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
     if (!subErr && savedSub && isUUID.test(submission.examId) && submission.questionResults?.length) {
       const answerRows = submission.questionResults
         .filter(qr => isUUID.test(qr.questionId))
@@ -177,8 +207,7 @@ export default function App() {
         }));
       if (answerRows.length) {
         await supabase.from("exam_question_answers").upsert(
-          answerRows,
-          { onConflict: "exam_submission_id,question_id" }
+          answerRows, { onConflict: "exam_submission_id,question_id" }
         );
       }
     }
@@ -190,22 +219,45 @@ export default function App() {
     });
   };
 
-  // ── Render ──────────────────────────────────────────────────────────────────
-  if (!currentUser) {
-    return <LoginPage onLogin={setCurrentUser} />;
-  }
+  // ── Handle login — enrich sub_admin with scope from sub_admins table ─────────
+  const handleLogin = async (normalizedUser) => {
+    if (normalizedUser.role === "sub_admin") {
+      const { data: saRow } = await supabase
+        .from("sub_admins")
+        .select("scope, scope_ref")
+        .eq("user_id", normalizedUser._uuid)
+        .maybeSingle();
+
+      setCurrentUser({
+        ...normalizedUser,
+        subAdminScope:    saRow?.scope     || "other",
+        subAdminScopeRef: saRow?.scope_ref || "",
+      });
+    } else {
+      setCurrentUser(normalizedUser);
+    }
+  };
+
+  // ── Render ───────────────────────────────────────────────────────────────────
+  if (!currentUser) return <LoginPage onLogin={handleLogin} />;
 
   if (currentUser.role === "admin") {
     return (
       <AdminDashboard
-        user={currentUser}
-        onLogout={() => setCurrentUser(null)}
+        user={currentUser} onLogout={() => setCurrentUser(null)}
+        users={users} setUsers={setUsers}
+        courses={courses} setCourses={setCourses}
+        enrollments={enrollments} setEnrollments={setEnrollments}
+      />
+    );
+  }
+
+  // ── Sub-admin: scope-aware dashboard ────────────────────────────────────────
+  if (currentUser.role === "sub_admin") {
+    return (
+      <SubAdminDashboard
+        user={currentUser} onLogout={() => setCurrentUser(null)}
         users={users}
-        setUsers={setUsers}
-        courses={courses}
-        setCourses={setCourses}
-        enrollments={enrollments}
-        setEnrollments={setEnrollments}
       />
     );
   }
@@ -213,8 +265,7 @@ export default function App() {
   if (currentUser.role === "student") {
     return (
       <StudentDashboard
-        user={currentUser}
-        onLogout={() => setCurrentUser(null)}
+        user={currentUser} onLogout={() => setCurrentUser(null)}
         onUpdateUser={setCurrentUser}
         courses={courses}
         examSubmissions={examSubmissions}
@@ -227,11 +278,9 @@ export default function App() {
   // teacher (default)
   return (
     <TeacherDashboard
-      user={currentUser}
-      onLogout={() => setCurrentUser(null)}
+      user={currentUser} onLogout={() => setCurrentUser(null)}
       onUpdateUser={setCurrentUser}
-      courses={courses}
-      setCourses={setCourses}
+      courses={courses} setCourses={setCourses}
       allUsers={users}
       examSubmissions={examSubmissions}
       enrollments={enrollments}
